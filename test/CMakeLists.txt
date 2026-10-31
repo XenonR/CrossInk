@@ -40,6 +40,8 @@ enable_testing()
 include(GoogleTest)
 
 add_subdirectory(anki_store)
+add_subdirectory(anki_protocol)
+add_subdirectory(anki_sync)
 
 add_subdirectory(streaming_json_parser)
 add_subdirectory(release_json_parser)

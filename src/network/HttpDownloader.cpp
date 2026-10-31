@@ -13,11 +13,13 @@
 #include <strings.h>
 
 #include <cstdio>
+#include <cstring>
 #include <functional>
 #include <string>
 #include <utility>
 
 #include "AppVersion.h"
+#include "AppCapabilities.h"
 #include "network/DownloadFileSwap.h"
 #include "network/HttpRedirectPolicy.h"
 #include "network/WifiPowerSaveGuard.h"
@@ -480,6 +482,120 @@ bool HttpDownloader::fetchUrl(const std::string& url, const DataCallback& onData
                               const std::string& password) {
   return streamUrl(url, onData, nullptr, username, password) == OK;
 }
+
+#if CROSSINK_APP_CAP_ANKI
+HttpDownloader::DownloadError HttpDownloader::requestToken(const std::string& url, const char* token,
+                                                           const char* method, const std::string_view body,
+                                                           const DataCallback& onData, const size_t maxResponseBytes,
+                                                           int& status, CancelCallback shouldCancel) {
+  status = 0;
+  const bool post = method && strcmp(method, "POST") == 0;
+  if (!token || (post && !*token) || !method || (!post && strcmp(method, "GET") != 0) || !onData ||
+      maxResponseBytes == 0 || body.size() > 16 * 1024 || (shouldCancel && shouldCancel())) {
+    LOG_ERR("HTTP", "Invalid or cancelled authenticated request");
+    return shouldCancel && shouldCancel() ? ABORTED : HTTP_ERROR;
+  }
+  for (const char* p = token; *p; ++p) {
+    if (*p == '\r' || *p == '\n' || p - token >= 128) {
+      LOG_ERR("HTTP", "Invalid authentication token");
+      return HTTP_ERROR;
+    }
+  }
+  WifiPowerSaveGuard wifiPowerSaveGuard;
+  (void)wifiPowerSaveGuard;
+
+  // One reusable I/O buffer keeps the worker's 4 KiB stack available to TLS.
+  auto buffer = makeUniqueNoThrow<char[]>(DEFAULT_DOWNLOAD_BUFFER_SIZE);
+  if (!buffer) {
+    LOG_ERR("HTTP", "Cannot allocate authenticated request buffer");
+    return HTTP_ERROR;
+  }
+  esp_http_client_config_t config = {};
+  config.url = url.c_str();
+  config.method = post ? HTTP_METHOD_POST : HTTP_METHOD_GET;
+  config.timeout_ms = 75000;
+  config.buffer_size = HTTP_RX_BUF;
+  config.buffer_size_tx = HTTP_TX_BUF;
+  config.crt_bundle_attach = esp_crt_bundle_attach;
+  config.keep_alive_enable = false;
+  auto* client = esp_http_client_init(&config);
+  if (!client) {
+    LOG_ERR("HTTP", "Authenticated client init failed");
+    return HTTP_ERROR;
+  }
+  auto cleanup = [&]() { esp_http_client_cleanup(client); };
+  bool headersOk = esp_http_client_set_header(client, "User-Agent", AppVersion::userAgent()) == ESP_OK &&
+                   esp_http_client_set_header(client, "Connection", "close") == ESP_OK &&
+                   esp_http_client_set_header(client, "Accept",
+                                              post || !*token ? "application/json" : "application/x-ndjson") == ESP_OK;
+  if (*token) {
+    const std::string authorization = std::string("Bearer ") + token;
+    headersOk = headersOk && esp_http_client_set_header(client, "Authorization", authorization.c_str()) == ESP_OK;
+  }
+  if (post) headersOk = headersOk && esp_http_client_set_header(client, "Content-Type", "application/json") == ESP_OK;
+#ifdef SIMULATOR
+  // The host shim executes its request in open(), including this staged body.
+  if (post) headersOk = headersOk && esp_http_client_set_post_field(client, body.data(), body.size()) == ESP_OK;
+#endif
+  if (!headersOk || esp_http_client_open(client, post ? body.size() : 0) != ESP_OK) {
+    LOG_ERR("HTTP", "Authenticated connection failed");
+    cleanup();
+    return HTTP_ERROR;
+  }
+#ifndef SIMULATOR
+  size_t sent = 0;
+  while (post && sent < body.size()) {
+    if (shouldCancel && shouldCancel()) {
+      cleanup();
+      return ABORTED;
+    }
+    const int written = esp_http_client_write(client, body.data() + sent, body.size() - sent);
+    if (written <= 0) {
+      LOG_ERR("HTTP", "Authenticated request body write failed");
+      cleanup();
+      return HTTP_ERROR;
+    }
+    sent += static_cast<size_t>(written);
+  }
+#endif
+  const int64_t length = esp_http_client_fetch_headers(client);
+  status = esp_http_client_get_status_code(client);
+  if (length < 0 || status != 200 || static_cast<uint64_t>(length) > maxResponseBytes) {
+    LOG_ERR("HTTP", "Authenticated response rejected (status=%d)", status);
+    cleanup();
+    return HTTP_ERROR;
+  }
+  size_t received = 0;
+  while (true) {
+    if (shouldCancel && shouldCancel()) {
+      cleanup();
+      return ABORTED;
+    }
+    const int bytes = esp_http_client_read(client, buffer.get(), DEFAULT_DOWNLOAD_BUFFER_SIZE);
+    if (bytes < 0) {
+      LOG_ERR("HTTP", "Authenticated response read failed");
+      cleanup();
+      return HTTP_ERROR;
+    }
+    if (bytes == 0) break;
+    if (static_cast<size_t>(bytes) > maxResponseBytes - received ||
+        !onData(reinterpret_cast<const uint8_t*>(buffer.get()), bytes)) {
+      LOG_ERR("HTTP", "Authenticated response exceeds limit or was rejected");
+      cleanup();
+      return FILE_ERROR;
+    }
+    received += static_cast<size_t>(bytes);
+    delay(0);
+  }
+  const bool complete = esp_http_client_is_complete_data_received(client);
+  cleanup();
+  if (!complete || (length > 0 && received != static_cast<uint64_t>(length))) {
+    LOG_ERR("HTTP", "Authenticated response incomplete");
+    return HTTP_ERROR;
+  }
+  return OK;
+}
+#endif
 
 HttpDownloader::DownloadError HttpDownloader::streamUrl(const std::string& url, const DataCallback& onData,
                                                         ProgressCallback progress, const std::string& username,

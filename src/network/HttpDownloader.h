@@ -88,6 +88,13 @@ class HttpDownloader {
                                  ProgressCallback progress = nullptr, const std::string& username = "",
                                  const std::string& password = "", DownloadOptions options = DownloadOptions());
 
+  // One authenticated transaction: no redirects and no automatic retries.
+  // The borrowed body is sent only for POST; response delivery is bounded.
+  // An empty token omits authentication for the desktop health endpoint.
+  static DownloadError requestToken(const std::string& url, const char* token, const char* method,
+                                    std::string_view body, const DataCallback& onData, size_t maxResponseBytes,
+                                    int& status, CancelCallback shouldCancel = nullptr);
+
   /**
    * Download a file to the SD card with optional credentials.
    */
