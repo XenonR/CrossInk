@@ -2895,7 +2895,13 @@ class AnkiSimulatorSmokeTest {
         {
           RenderLock lock;
           SETTINGS.uiTheme = CrossPointSettings::CLASSIC;
-          SETTINGS.uiScale = CrossPointSettings::UI_SCALE_SMALL;
+          const char* scale = std::getenv("CROSSINK_SIMULATOR_ANKI_UI_SCALE");
+          SETTINGS.uiScale = scale && std::strcmp(scale, "large") == 0 ? CrossPointSettings::UI_SCALE_LARGE
+                                                                       : CrossPointSettings::UI_SCALE_SMALL;
+          const char* language = std::getenv("CROSSINK_SIMULATOR_ANKI_LANGUAGE");
+          const auto requestedLanguage = I18n::languageFromCode(language ? language : "EN");
+          I18N.setLanguage(requestedLanguage);
+          if (I18N.getLanguage() != requestedLanguage) fail("Requested Anki UI language is not built in");
           SETTINGS.disableReaderTouchscreen = false;
           UITheme::getInstance().reload();
         }
@@ -2919,9 +2925,20 @@ class AnkiSimulatorSmokeTest {
           activityManager.goToAnki();
           advance(Step::SyncHome);
         } else {
-          createSnapshot();
-          openTheme();
+          activityManager.goToAnki();
+          advance(Step::EmptyHome);
         }
+        break;
+      case Step::EmptyHome:
+        requireActivity("AnkiHome");
+        captureOrientations("empty-library");
+        if (std::getenv("CROSSINK_SIMULATOR_ANKI_CAPTURES")) {
+          RenderLock lock;
+          static_cast<AnkiHomeActivity*>(activityManager.simulatorCurrentActivity())->simulatorShowSaveError();
+        }
+        captureOrientations("action-error");
+        createSnapshot();
+        openTheme();
         break;
       case Step::ThemeHome: {
         auto* home = dynamic_cast<HomeActivity*>(activityManager.simulatorCurrentActivity());
@@ -3064,6 +3081,7 @@ class AnkiSimulatorSmokeTest {
       case Step::SaveFailed:
         if (!review().simulatorState().error || review().simulatorState().cardOrdinal != 4)
           fail("Failed SD append must keep the current card ungraded");
+        captureOrientations("save-failed");
         std::filesystem::remove(blockedJournal);
         std::filesystem::rename(blockedJournal.string() + ".blocked", blockedJournal);
         button(MappedInputManager::Button::Back, Step::AfterFailure);
@@ -3101,6 +3119,7 @@ class AnkiSimulatorSmokeTest {
         break;
       case Step::Completed:
         if (!review().simulatorState().done) fail("Completed batch did not show completion");
+        captureOrientations("completion");
         checkPending(5, 0);
         button(MappedInputManager::Button::Back, Step::RestartDone);
         break;
@@ -3121,6 +3140,7 @@ class AnkiSimulatorSmokeTest {
         break;
       case Step::SyncConfiguration: {
         if (!syncState().configureOnly) fail("Home Connection did not open configuration mode");
+        captureOrientations("connection");
         button(MappedInputManager::Button::Down, Step::SyncSelectNow);
         break;
       }
@@ -3138,6 +3158,7 @@ class AnkiSimulatorSmokeTest {
           break;
         }
         if (state.outcome != anki::SyncResult::Success) fail("Worker/HTTP synchronization did not succeed");
+        captureOrientations("sync-complete");
         anki::AnkiStore store;
         const char* generation = std::getenv("CROSSINK_SIMULATOR_ANKI_GENERATION");
         if (!generation || !store.open() || !store.hasSnapshot() || store.failed() || store.needsAttention() ||
@@ -3170,6 +3191,7 @@ class AnkiSimulatorSmokeTest {
  private:
   enum class Step {
     Start,
+    EmptyHome,
     ThemeHome,
     ThemeDecks,
     SelectDeckFirst,
@@ -3318,6 +3340,25 @@ class AnkiSimulatorSmokeTest {
       if (!store.appendCard(card)) fail("Cannot append smoke card");
     }
     if (!store.commitSnapshot()) fail("Cannot activate smoke snapshot");
+  }
+  static void captureOrientations(const char* name) {
+    if (!std::getenv("CROSSINK_SIMULATOR_ANKI_CAPTURES")) return;
+    const auto original = renderer.getOrientation();
+    for (int i = 0; i < 4; ++i) {
+      {
+        RenderLock lock;
+        renderer.setOrientation(static_cast<GfxRenderer::Orientation>(i));
+      }
+      if (activityManager.requestUpdateAndWait() != RequestUpdateResult::Rendered) fail("Capture render rejected");
+      char filename[64];
+      snprintf(filename, sizeof(filename), "%s-%d", name, i);
+      capture(filename);
+    }
+    {
+      RenderLock lock;
+      renderer.setOrientation(original);
+    }
+    if (activityManager.requestUpdateAndWait() != RequestUpdateResult::Rendered) fail("Restore render rejected");
   }
   static void capture(const char* name) {
     const char* directory = std::getenv("CROSSINK_SIMULATOR_ANKI_CAPTURES");

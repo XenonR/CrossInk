@@ -8,6 +8,7 @@
 #include <cstdio>
 
 #include "AnkiReviewActivity.h"
+#include "AnkiUi.h"
 #include "activities/util/ConfirmationActivity.h"
 #include "components/CompactHeader.h"
 #include "components/TouchHeaderBackButton.h"
@@ -187,9 +188,15 @@ void AnkiHomeActivity::screen(UiApp::ScreenType& screen, void* context) {
   screen.setContentMargin(fui::Insets{static_cast<int16_t>(CompactHeader::contentTop(metrics)), 0,
                                       static_cast<int16_t>(metrics.buttonHintsHeight), 0});
   if (!self->store.hasSnapshot() || self->storageError) {
-    const auto band = screen.takeTop(screen.theme().rowHeight);
-    screen.target().text(band, self->storageError ? tr(STR_ANKI_STORAGE_ERROR) : tr(STR_ANKI_NO_CARDS),
-                         screen.theme().bodyText);
+    const char* message = self->storageError ? tr(STR_ANKI_STORAGE_ERROR) : tr(STR_ANKI_NO_CARDS);
+    const auto bounds = screen.body().inset(fui::Insets{0, static_cast<int16_t>(metrics.contentSidePadding), 0,
+                                                        static_cast<int16_t>(metrics.contentSidePadding)});
+    const auto style = anki::ui::messageStyle(screen.target(), bounds, screen.theme().bodyText);
+    const auto size = fui::measureWrappedText(screen.target(), message, style, bounds.width);
+    auto band = screen.takeTop(std::max(screen.theme().rowHeight, size.height), screen.theme().spaceSm);
+    band.x = bounds.x;
+    band.width = bounds.width;
+    anki::ui::drawMessage(screen.target(), band, message, style);
   }
   fui::ListProps props;
   props.count = static_cast<uint16_t>(self->rowCount());
@@ -198,22 +205,44 @@ void AnkiHomeActivity::screen(UiApp::ScreenType& screen, void* context) {
   props.selectedIndex = static_cast<int16_t>(self->selectedIndex);
   props.action = kRow;
   props.inputMask = fui::InputTouch;
+  props.labelText = screen.theme().bodyText;
+  props.labelText.maxLines = 2;
+  props.subtitleText = screen.theme().smallText;
+  props.subtitleText.maxLines = 2;
   self->visibleRows = std::max(1, static_cast<int>(configureUiList(props, screen.theme(), screen.body())));
   self->topIndex = scrollListBy(self->topIndex, 0, self->visibleRows, self->rowCount());
   props.topIndex = static_cast<uint16_t>(self->topIndex);
   screen.list(props);
+  if (self->actionError) {
+    const char* message = tr(STR_ANKI_SAVE_FAILED);
+    fui::PopupProps popup;
+    popup.styles = screen.theme().popup;
+    const auto bounds = screen.body();
+    const int16_t width = bounds.width * 3 / 4;
+    const int16_t textWidth = std::max(1, width - popup.padding.left - popup.padding.right);
+    auto style = anki::ui::messageStyle(screen.target(), bounds, screen.theme().bodyText);
+    style.align = fui::TextAlign::Center;
+    const auto size = fui::measureWrappedText(screen.target(), message, style, textWidth);
+    const auto panel = fui::centeredRect(
+        bounds, fui::Size{static_cast<int16_t>(size.width + popup.padding.left + popup.padding.right),
+                          static_cast<int16_t>(size.height + popup.padding.top + popup.padding.bottom)});
+    // Paint SDK chrome without its allocating multiline text adapter: this
+    // error can itself follow an allocation failure when opening a review.
+    fui::popup(screen.frame(), panel, popup);
+    anki::ui::drawMessage(screen.target(), panel.inset(popup.padding), message, style);
+  }
 }
 
 void AnkiHomeActivity::render(RenderLock&&) {
   renderer.clearScreen();
   TouchHeaderBackButton::drawCompact(renderer, tr(STR_ANKI));
+  app.setDevice(uiTarget.deviceContext());
   uiReady = false;
   app.render();
   uiReady = true;
   const auto labels =
       mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_HOME)), tr(STR_OPEN), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
-  if (actionError) GUI.drawPopup(renderer, tr(STR_ANKI_SAVE_FAILED));
   renderer.displayBuffer();
 }
 #endif

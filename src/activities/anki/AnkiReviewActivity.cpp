@@ -9,6 +9,7 @@
 #include <cstring>
 #include <ctime>
 
+#include "AnkiUi.h"
 #include "components/CompactHeader.h"
 #include "components/TouchHeaderBackButton.h"
 #include "components/UIScale.h"
@@ -314,10 +315,18 @@ void AnkiReviewActivity::drawCard(UiApp::ScreenType& screen) {
 void AnkiReviewActivity::screen(UiApp::ScreenType& screen, void* context) {
   auto* self = static_cast<AnkiReviewActivity*>(context);
   if (self->storageError || self->saveError || self->done) {
+    const auto& metrics = UITheme::getInstance().getMetrics();
+    screen.setContentMarginFromScreen(
+        fui::Insets{static_cast<int16_t>(CompactHeader::contentTop(metrics) + metrics.verticalSpacing),
+                    static_cast<int16_t>(metrics.contentSidePadding),
+                    static_cast<int16_t>(metrics.buttonHintsHeight + metrics.verticalSpacing),
+                    static_cast<int16_t>(metrics.contentSidePadding)});
     const char* message = self->saveError
                               ? tr(STR_ANKI_SAVE_FAILED)
                               : (self->storageError ? tr(STR_ANKI_STORAGE_ERROR) : tr(STR_ANKI_SESSION_DONE));
-    screen.centeredText(message, screen.theme().bodyText);
+    auto style = screen.theme().bodyText;
+    style.align = fui::TextAlign::Center;
+    anki::ui::drawMessage(screen.target(), screen.body(), message, style);
     return;
   }
   self->drawCard(screen);
@@ -328,6 +337,7 @@ void AnkiReviewActivity::render(RenderLock&&) {
   char title[96];
   snprintf(title, sizeof(title), "%s — %s", tr(STR_ANKI), answer ? tr(STR_ANKI_ANSWER) : tr(STR_ANKI_QUESTION));
   TouchHeaderBackButton::drawCompact(renderer, title);
+  app.setDevice(uiTarget.deviceContext());
   uiReady = false;
   app.render();
   uiReady = true;

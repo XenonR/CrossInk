@@ -147,7 +147,9 @@ def main() -> int:
     parser.add_argument("--program", type=Path, default=ROOT / ".pio/build/x4-pro-simulator/program")
     parser.add_argument("--book", type=Path, default=DEFAULT_BOOK)
     parser.add_argument("--build", action="store_true", help="Build the x4-pro-simulator environment first")
-    parser.add_argument("--captures", type=Path, help="Save question and answer PGM screenshots")
+    parser.add_argument("--captures", type=Path, help="Save PGM screenshots (messages in all orientations)")
+    parser.add_argument("--language", choices=("en", "de"), default="en", help="Anki UI language")
+    parser.add_argument("--ui-scale", choices=("small", "large"), default="small", help="Anki UI text size")
     parser.add_argument("--timeout", type=int, default=120, help="Maximum seconds for each simulator process")
     parser.add_argument("--protocol", type=int, choices=(2, 3), action="append", help="Protocol to test (default: both)")
     args = parser.parse_args()
@@ -167,6 +169,8 @@ def main() -> int:
             shutil.copy2(args.book, books / args.book.name)
             env = os.environ.copy()
             env["SDL_VIDEODRIVER"] = "dummy"
+            env["CROSSINK_SIMULATOR_ANKI_LANGUAGE"] = args.language.upper()
+            env["CROSSINK_SIMULATOR_ANKI_UI_SCALE"] = args.ui_scale
             env["CROSSINK_SIMULATOR_SMOKE_BOOK"] = f"/books/{args.book.name}"
             env["CROSSPOINT_SIM_WIFI_NETWORKS"] = "Anki smoke test:-45:open"
             env["CROSSPOINT_SIM_WIFI_CONNECT"] = "success"

@@ -6,6 +6,7 @@
 #include <WiFi.h>
 #include <esp_task_wdt.h>
 
+#include "AnkiUi.h"
 #include "SdCardFontSystem.h"
 #include "SilentRestart.h"
 #include "activities/network/WifiSelectionActivity.h"
@@ -332,10 +333,15 @@ void AnkiSyncActivity::screen(UiApp::ScreenType& screen, void* context) {
   const auto& metrics = UITheme::getInstance().getMetrics();
   screen.setContentMargin(fui::Insets{static_cast<int16_t>(CompactHeader::contentTop(metrics)), 0,
                                       static_cast<int16_t>(metrics.buttonHintsHeight), 0});
-  const auto band = screen.takeTop(screen.theme().rowHeight * 2);
-  auto statusStyle = screen.theme().smallText;
-  statusStyle.maxLines = 3;
-  screen.target().text(band, self->statusText(), statusStyle);
+  const char* message = self->statusText();
+  const auto bounds = screen.body().inset(fui::Insets{0, static_cast<int16_t>(metrics.contentSidePadding), 0,
+                                                      static_cast<int16_t>(metrics.contentSidePadding)});
+  const auto statusStyle = anki::ui::messageStyle(screen.target(), bounds, screen.theme().smallText);
+  const auto size = fui::measureWrappedText(screen.target(), message, statusStyle, bounds.width);
+  auto band = screen.takeTop(std::max(screen.theme().rowHeight, size.height), screen.theme().spaceSm);
+  band.x = bounds.x;
+  band.width = bounds.width;
+  anki::ui::drawMessage(screen.target(), band, message, statusStyle);
   if (self->running.load()) return;
   fui::ListItem items[3];
   items[0].label = tr(STR_ANKI_SERVER_URL);
@@ -350,6 +356,8 @@ void AnkiSyncActivity::screen(UiApp::ScreenType& screen, void* context) {
   props.selectedIndex = self->selectedIndex;
   props.action = ROW_ACTION;
   props.inputMask = fui::InputTouch;
+  props.labelText = screen.theme().bodyText;
+  props.labelText.maxLines = 2;
   configureUiList(props, screen.theme(), screen.body());
   screen.list(props);
 }
@@ -357,6 +365,7 @@ void AnkiSyncActivity::screen(UiApp::ScreenType& screen, void* context) {
 void AnkiSyncActivity::render(RenderLock&&) {
   renderer.clearScreen();
   TouchHeaderBackButton::drawCompact(renderer, configureOnly ? tr(STR_ANKI_CONNECTION) : tr(STR_ANKI_SYNC));
+  app.setDevice(uiTarget.deviceContext());
   uiReady = false;
   app.render();
   uiReady = !running.load();

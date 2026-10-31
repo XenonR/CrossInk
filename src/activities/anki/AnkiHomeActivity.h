@@ -18,6 +18,9 @@ class AnkiHomeActivity final : public Activity {
   void loop() override;
   void render(RenderLock&&) override;
   bool allowGlobalHomeSwipeGesture() const override { return false; }
+#ifdef SIMULATOR
+  void simulatorShowSaveError() { actionError = true; }
+#endif
 
  private:
   using UiApp = freeink::ui::FreeInkApp<24, 2>;
