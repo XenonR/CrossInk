@@ -191,7 +191,7 @@ bool AnkiStore::beginSnapshot(const char* generation, uint16_t count) {
   uint8_t zeros[256] = {};
   bool ok = static_cast<bool>(import_->file);
   for (size_t written = 0; ok && written < import_->end;) {
-    const size_t n = std::min(sizeof(zeros), import_->end - written);
+    const size_t n = std::min<size_t>(sizeof(zeros), import_->end - written);
     ok = import_->file.write(zeros, n) == n;
     written += n;
   }

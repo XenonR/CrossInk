@@ -5,6 +5,8 @@
 #include <ObfuscationUtils.h>
 #include <PersistableStore.h>
 
+#include <cstring>
+
 #include "AnkiConnectionStore.h"
 #include "network/HttpRedirectPolicy.h"
 
@@ -49,14 +51,24 @@ bool AnkiConnectionStore::load(Connection& out) {
     return false;
   }
   JsonDocument doc;
-  if (!PersistableStoreBase::readDocFromFile(PATH, doc) || doc["version"].as<int>() != 1) {
+  if (!PersistableStoreBase::readDocFromFile(PATH, doc) || !doc.is<JsonObject>() || !doc["version"].is<unsigned>() ||
+      doc["version"].as<unsigned>() != 1 || !doc["url"].is<const char*>() || !doc["token_obf"].is<const char*>()) {
     LOG_ERR("ANKI", "Invalid connection settings");
     return false;
   }
+  const JsonString url = doc["url"].as<JsonString>();
+  const JsonString encodedToken = doc["token_obf"].as<JsonString>();
+  // Preserve lengths until validation: C-string conversion would hide an
+  // embedded NUL in a damaged address or credential payload.
+  if (url.size() > MAX_URL_BYTES || memchr(url.c_str(), '\0', url.size()) ||
+      memchr(encodedToken.c_str(), '\0', encodedToken.size())) {
+    LOG_ERR("ANKI", "Invalid connection settings strings");
+    return false;
+  }
   Connection candidate;
-  candidate.url = doc["url"] | "";
+  candidate.url.assign(url.c_str(), url.size());
   obfuscation::DecodeStatus status = obfuscation::DecodeStatus::INVALID;
-  candidate.token = obfuscation::deobfuscateFromBase64(doc["token_obf"] | "", MAX_TOKEN_BYTES, &status);
+  candidate.token = obfuscation::deobfuscateFromBase64(encodedToken.c_str(), MAX_TOKEN_BYTES, &status);
   if ((status != obfuscation::DecodeStatus::VALIDATED && status != obfuscation::DecodeStatus::EMPTY) ||
       !normalizeUrl(candidate.url) || !validToken(candidate.token)) {
     LOG_ERR("ANKI", "Unreadable connection credentials");

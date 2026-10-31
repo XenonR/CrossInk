@@ -18,8 +18,8 @@
 #include <string>
 #include <utility>
 
-#include "AppVersion.h"
 #include "AppCapabilities.h"
+#include "AppVersion.h"
 #include "network/DownloadFileSwap.h"
 #include "network/HttpRedirectPolicy.h"
 #include "network/WifiPowerSaveGuard.h"
@@ -488,15 +488,19 @@ HttpDownloader::DownloadError HttpDownloader::requestToken(const std::string& ur
                                                            const char* method, const std::string_view body,
                                                            const DataCallback& onData, const size_t maxResponseBytes,
                                                            int& status, CancelCallback shouldCancel) {
+  constexpr size_t MAX_TOKEN_BYTES = 128;
   status = 0;
   const bool post = method && strcmp(method, "POST") == 0;
   if (!token || (post && !*token) || !method || (!post && strcmp(method, "GET") != 0) || !onData ||
-      maxResponseBytes == 0 || body.size() > 16 * 1024 || (shouldCancel && shouldCancel())) {
-    LOG_ERR("HTTP", "Invalid or cancelled authenticated request");
-    return shouldCancel && shouldCancel() ? ABORTED : HTTP_ERROR;
+      maxResponseBytes == 0 || body.size() > 16 * 1024 || (!post && !body.empty())) {
+    LOG_ERR("HTTP", "Invalid authenticated request");
+    return HTTP_ERROR;
+  }
+  if (shouldCancel && shouldCancel()) {
+    return ABORTED;
   }
   for (const char* p = token; *p; ++p) {
-    if (*p == '\r' || *p == '\n' || p - token >= 128) {
+    if (static_cast<unsigned char>(*p) < 0x20 || *p == 0x7f || static_cast<size_t>(p - token) >= MAX_TOKEN_BYTES) {
       LOG_ERR("HTTP", "Invalid authentication token");
       return HTTP_ERROR;
     }
@@ -518,6 +522,9 @@ HttpDownloader::DownloadError HttpDownloader::requestToken(const std::string& ur
   config.buffer_size_tx = HTTP_TX_BUF;
   config.crt_bundle_attach = esp_crt_bundle_attach;
   config.keep_alive_enable = false;
+#ifndef SIMULATOR
+  config.disable_auto_redirect = true;
+#endif
   auto* client = esp_http_client_init(&config);
   if (!client) {
     LOG_ERR("HTTP", "Authenticated client init failed");
@@ -529,10 +536,16 @@ HttpDownloader::DownloadError HttpDownloader::requestToken(const std::string& ur
                    esp_http_client_set_header(client, "Accept",
                                               post || !*token ? "application/json" : "application/x-ndjson") == ESP_OK;
   if (*token) {
-    const std::string authorization = std::string("Bearer ") + token;
-    headersOk = headersOk && esp_http_client_set_header(client, "Authorization", authorization.c_str()) == ESP_OK;
+    char authorization[sizeof("Bearer ") + MAX_TOKEN_BYTES];
+    snprintf(authorization, sizeof(authorization), "Bearer %s", token);
+    headersOk = headersOk && esp_http_client_set_header(client, "Authorization", authorization) == ESP_OK;
   }
-  if (post) headersOk = headersOk && esp_http_client_set_header(client, "Content-Type", "application/json") == ESP_OK;
+  if (post) {
+    char contentLength[16];
+    snprintf(contentLength, sizeof(contentLength), "%zu", body.size());
+    headersOk = headersOk && esp_http_client_set_header(client, "Content-Type", "application/json") == ESP_OK &&
+                esp_http_client_set_header(client, "Content-Length", contentLength) == ESP_OK;
+  }
 #ifdef SIMULATOR
   // The host shim executes its request in open(), including this staged body.
   if (post) headersOk = headersOk && esp_http_client_set_post_field(client, body.data(), body.size()) == ESP_OK;

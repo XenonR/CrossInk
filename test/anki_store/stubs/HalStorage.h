@@ -1,4 +1,6 @@
 #pragma once
+#include <Arduino.h>
+
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
@@ -39,6 +41,9 @@ struct TestStorage {
     return true;
   }
   HalFile open(const char* path, int flags = O_RDONLY);
+  bool openFileForRead(const char*, const char* path, HalFile& file);
+  bool writeFile(const char* path, const String& content);
+  String readFile(const char* path);
 };
 inline TestStorage Storage;
 class HalFile {
@@ -65,6 +70,7 @@ class HalFile {
   }
   explicit operator bool() const { return !path_.empty(); }
   size_t size() const { return *this ? Storage.files.at(path_).size() : 0; }
+  size_t fileSize() const { return size(); }
   size_t position() const { return pos_; }
   bool seek(size_t n) {
     if (!*this || !Storage.operation()) return false;
@@ -110,5 +116,26 @@ inline HalFile TestStorage::open(const char* path, int flags) {
   }
   if (flags & O_TRUNC) files[path].clear();
   return HalFile(path, flags);
+}
+inline bool TestStorage::openFileForRead(const char*, const char* path, HalFile& file) {
+  file = open(path, O_RDONLY);
+  return static_cast<bool>(file);
+}
+inline bool TestStorage::writeFile(const char* path, const String& content) {
+  auto file = open(path, O_WRONLY | O_CREAT | O_TRUNC);
+  if (!file) return false;
+  const bool written = file.write(content.c_str(), content.size()) == content.size();
+  const bool synced = written && file.sync();
+  const bool closed = file.close();
+  return synced && closed;
+}
+inline String TestStorage::readFile(const char* path) {
+  auto file = open(path, O_RDONLY);
+  if (!file) return {};
+  String content;
+  content.resize(file.size());
+  const bool read = file.read(content.data(), content.size()) == static_cast<int>(content.size());
+  const bool closed = file.close();
+  return read && closed ? content : String();
 }
 using FsFile = HalFile;
