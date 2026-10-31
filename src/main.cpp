@@ -349,6 +349,7 @@ RTC_NOINIT_ATTR uint32_t silentReaderPageBuildFlags;
 constexpr uint32_t SILENT_REBOOT_MAGIC = 0xC1EAB007;
 constexpr uint32_t SILENT_REBOOT_TARGET_HOME = 0;
 constexpr uint32_t SILENT_REBOOT_TARGET_READER = 1;
+constexpr uint32_t SILENT_REBOOT_HOME_ANKI = 0x414e4b49;
 // Common restart flags share the target word so destination payloads stay intact.
 constexpr uint32_t SILENT_REBOOT_FRONTLIGHT_VALID = 1U << 31;
 constexpr uint32_t SILENT_REBOOT_FRONTLIGHT_ON = 1U << 30;
@@ -412,6 +413,10 @@ static void silentRestartToHome(const uint32_t payload, const char* const descri
 }
 
 void silentRestart() { silentRestartToHome(0, "target=home"); }
+
+#if CROSSINK_APP_CAP_ANKI
+void silentRestartToAnki() { silentRestartToHome(SILENT_REBOOT_HOME_ANKI, "target=anki"); }
+#endif
 
 void restartToHomeAfterStorageHandoff() {
   // Keep this distinct from other callers: USB Drive has released raw SD
@@ -1519,6 +1524,11 @@ void setup() {
       case NetworkBootTarget::OPDS:
         launched = activityManager.goToOpdsServer(snapshotPayload, true);
         break;
+      case NetworkBootTarget::ANKI:
+#if CROSSINK_APP_CAP_ANKI
+        launched = activityManager.goToAnkiSync(false, true);
+#endif
+        break;
       case NetworkBootTarget::KOREADER_SYNC:
         launched = startGlobalSyncProgress(true, decodeKOReaderSyncOrientation(snapshotPayload));
         break;
@@ -1554,8 +1564,15 @@ void setup() {
       LOG_ERR("MAIN", "Minimal network boot target failed; returning home");
       silentRestart();
     }
-  } else if (resume == BootResume::Silent && snapshotTarget == SILENT_REBOOT_TARGET_READER &&
-             !APP_STATE.openEpubPath.empty()) {
+  }
+#if CROSSINK_APP_CAP_ANKI
+  else if (resume == BootResume::Silent && snapshotTarget == SILENT_REBOOT_TARGET_HOME &&
+           snapshotPayload == SILENT_REBOOT_HOME_ANKI) {
+    activityManager.goToAnki();
+  }
+#endif
+  else if (resume == BootResume::Silent && snapshotTarget == SILENT_REBOOT_TARGET_READER &&
+           !APP_STATE.openEpubPath.empty()) {
     activityManager.goToReader(APP_STATE.openEpubPath, false, false, cleanImageBaseOnEntry);
   } else if (resume == BootResume::Silent) {
     // target == home (or reader with no open book): land on home — don't fall

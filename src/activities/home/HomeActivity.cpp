@@ -35,6 +35,7 @@
 #include "RecentBookProgress.h"
 #include "RecentBooksStore.h"
 #include "SavedItemsHomeActivity.h"
+#include "components/TouchRegistry.h"
 #include "components/UITheme.h"
 #include "components/themes/dashboard/DashboardTheme.h"
 #include "components/themes/lyra/LyraCarouselTheme.h"
@@ -62,6 +63,9 @@ enum class HomeMenuAction {
   Bookmarks,
   FileTransfer,
   Settings,
+#if CROSSINK_APP_CAP_ANKI
+  Anki,
+#endif
 };
 
 struct HomeMenuEntry {
@@ -71,7 +75,7 @@ struct HomeMenuEntry {
 };
 
 struct HomeMenuEntries {
-  static constexpr int kCapacity = 8;
+  static constexpr int kCapacity = 8 + CROSSINK_APP_CAP_ANKI;
   std::array<HomeMenuEntry, kCapacity> entries{};
   int count = 0;
 
@@ -238,6 +242,10 @@ void appendHomeMenuItems(HomeMenuEntries& items, bool hasOpdsServers, bool hasRe
   items.push({tr(STR_BROWSE_FILES), Folder, HomeMenuAction::BrowseFiles});
   items.push({tr(STR_LIBRARY), Library, HomeMenuAction::Library});
 
+#if CROSSINK_APP_CAP_ANKI
+  items.push({tr(STR_ANKI), Book, HomeMenuAction::Anki});
+#endif
+
   if (hasOpdsServers) {
     items.push({tr(STR_OPDS_BROWSER), Opds, HomeMenuAction::OpdsBrowser});
   }
@@ -260,6 +268,9 @@ HomeMenuEntries buildHomeMenuItems(bool hasOpdsServers, bool hasReadingStats, bo
 
 HomeMenuEntries buildMinimalMenuItems(bool hasOpdsServers, bool hasReadingStats, bool hasBookmarks, bool hasClippings) {
   HomeMenuEntries items;
+#if CROSSINK_APP_CAP_ANKI
+  items.push({tr(STR_ANKI), Book, HomeMenuAction::Anki});
+#endif
   if (SETTINGS.isLibraryFileBrowserSwapped()) {
     items.push({tr(STR_BROWSE_FILES), Folder, HomeMenuAction::BrowseFiles});
   } else {
@@ -529,9 +540,9 @@ static_assert(HomeActivity::kMaxCachedBooks >= LyraCarouselMetrics::values.homeR
               "kMaxCachedBooks must cover all carousel slots");
 
 int HomeActivity::getMenuItemCount() const {
-  if (coverGridUi) return static_cast<int>(recentBooks.size()) + (hasOpdsServers ? 5 : 4);
+  if (coverGridUi) return static_cast<int>(recentBooks.size()) + (hasOpdsServers ? 5 : 4) + CROSSINK_APP_CAP_ANKI;
   const auto& metrics = UITheme::getInstance().getMetrics();
-  int count = 4;  // File Browser, Library, File transfer, Settings
+  int count = 4 + CROSSINK_APP_CAP_ANKI;  // File Browser, Library, File transfer, Settings, optional Anki
   if (!metrics.homeContinueReadingInMenu && !recentBooks.empty()) {
     count += getVisibleRecentBookCount();
   } else if (metrics.homeContinueReadingInMenu && !recentBooks.empty()) {
@@ -548,6 +559,47 @@ int HomeActivity::getMenuItemCount() const {
   }
   return count;
 }
+
+#if defined(SIMULATOR) && CROSSINK_APP_CAP_ANKI
+bool HomeActivity::simulatorPrepareAnki(int& touchX, int& touchY) {
+  touchX = touchY = -1;
+  if (coverGridUi) {
+    selectorIndex = static_cast<int>(recentBooks.size()) + (hasOpdsServers ? 5 : 4);
+    requestUpdate();
+    return true;
+  }
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const bool minimal = usesMinimalHomeInteraction();
+  const auto items = minimal ? buildMinimalMenuItems(hasOpdsServers, hasReadingStats, hasBookmarks, hasClippings)
+                             : buildSelectableHomeMenuItems(hasOpdsServers, hasReadingStats, hasBookmarks, hasClippings,
+                                                            metrics.homeContinueReadingInMenu && !recentBooks.empty());
+  for (int i = 0; i < items.size(); ++i) {
+    if (items[i].action != HomeMenuAction::Anki) continue;
+    if (minimal) {
+      minimalMenuOpen = true;
+      minimalSuppressInitialFrontRelease = false;
+      minimalMenuIndex = i;
+    } else {
+      selectorIndex = getHomeMenuSelectionOffset(recentBooks) + i;
+    }
+    if (SETTINGS.uiTheme == CrossPointSettings::LYRA_CAROUSEL) {
+      const auto rect = LyraCarouselTheme::buttonMenuTouchRect(renderer, items.size());
+      touchY = rect.y + rect.height / 2;
+      for (int x = 0; x < renderer.getScreenWidth(); ++x) {
+        int id = -1;
+        if (TouchRegistry::getInstance().hitTest(x, touchY, TouchRegistry::Item, id) && id == i) {
+          touchX = x + 2;
+          break;
+        }
+      }
+      if (touchX < 0) return false;
+    }
+    requestUpdate();
+    return true;
+  }
+  return false;
+}
+#endif
 
 void HomeActivity::loadRecentBooks(int maxBooks) {
   recentBooks.clear();
@@ -1402,7 +1454,7 @@ void HomeActivity::loop() {
     }
 
     const int bookCount = static_cast<int>(recentBooks.size());
-    const int tabCount = hasOpdsServers ? 5 : 4;
+    const int tabCount = (hasOpdsServers ? 5 : 4) + CROSSINK_APP_CAP_ANKI;
     const auto cycleBand = [this](const int base, const int count, const int dir) {
       if (count <= 0) return;
       const int current = selectorIndex - base;
@@ -1475,6 +1527,11 @@ void HomeActivity::loop() {
           case HomeMenuAction::FileTransfer:
             onFileTransferOpen();
             break;
+#if CROSSINK_APP_CAP_ANKI
+          case HomeMenuAction::Anki:
+            activityManager.goToAnki();
+            break;
+#endif
           case HomeMenuAction::ContinueReading:
           case HomeMenuAction::Settings:
             break;
@@ -1720,6 +1777,11 @@ void HomeActivity::loop() {
       case HomeMenuAction::FileTransfer:
         onFileTransferOpen();
         break;
+#if CROSSINK_APP_CAP_ANKI
+      case HomeMenuAction::Anki:
+        activityManager.goToAnki();
+        break;
+#endif
       case HomeMenuAction::Settings:
         onSettingsOpen();
         break;
@@ -1980,6 +2042,12 @@ void HomeActivity::activateCoverGridSelection() {
     return;
   }
   const int tab = selectorIndex - static_cast<int>(recentBooks.size());
+#if CROSSINK_APP_CAP_ANKI
+  if (tab == (hasOpdsServers ? 5 : 4)) {
+    activityManager.goToAnki();
+    return;
+  }
+#endif
   switch (tab) {
     case 0:
       onFileBrowserOpen();

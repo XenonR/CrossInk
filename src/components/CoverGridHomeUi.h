@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "AppCapabilities.h"
 #include "HomeCoverCache.h"
 #include "RecentBooksStore.h"
 #include "UiAppHost.h"
@@ -61,5 +62,5 @@ class CoverGridHomeUi final : public UiAppHost<16, 1> {
   freeink::ui::CoverGridProps grid;
   freeink::ui::Rect gridBounds{};
   freeink::ui::TabBarProps tabs;
-  std::array<freeink::ui::TabItem, 5> tabItems;
+  std::array<freeink::ui::TabItem, 5 + CROSSINK_APP_CAP_ANKI> tabItems;
 };

@@ -227,10 +227,14 @@ void CoverGridHomeUi::drawGrid(UiScreen& screen) {
 }
 
 void CoverGridHomeUi::drawTabs(UiScreen& screen, fui::Rect rect) {
-  static constexpr const freeink::Icon* ICONS[] = {&icon_folder_32, &icon_landmark_32, &icon_lyra_library_32,
-                                                   &icon_lyra_transfer_32, &icon_lyra_settings_32};
+  static constexpr const freeink::Icon* ICONS[] = {
+      &icon_folder_32, &icon_landmark_32, &icon_lyra_library_32, &icon_lyra_transfer_32, &icon_lyra_settings_32,
+#if CROSSINK_APP_CAP_ANKI
+      &icon_book_32,
+#endif
+  };
   int count = 0;
-  for (int i = 0; i < 5; ++i) {
+  for (int i = 0; i < 5 + CROSSINK_APP_CAP_ANKI; ++i) {
     if (i == 2 && !hasOpds) continue;
     auto& tab = tabItems[count];
     tab.value = books->size() + count;

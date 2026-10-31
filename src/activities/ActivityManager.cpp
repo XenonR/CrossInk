@@ -47,6 +47,11 @@
 #include "util/SwipeAdjustment.h"
 #include "util/TwoFingerSwipe.h"
 
+#if CROSSINK_APP_CAP_ANKI
+#include "anki/AnkiHomeActivity.h"
+#include "anki/AnkiSyncActivity.h"
+#endif
+
 namespace {
 constexpr uint32_t FILE_TRANSFER_MODE_MASK = 0xFF;
 constexpr uint32_t FILE_TRANSFER_RETURN_TO_READER = 1U << 8;
@@ -970,6 +975,35 @@ void ActivityManager::goToBrowser() {
     replaceActivity(std::make_unique<OpdsServerListActivity>(renderer, mappedInput, true));
   }
 }
+
+#if CROSSINK_APP_CAP_ANKI
+void ActivityManager::goToAnki() {
+  auto activity = makeUniqueNoThrow<AnkiHomeActivity>(renderer, mappedInput);
+  if (!activity) {
+    LOG_ERR("ACT", "OOM opening Anki");
+    return;
+  }
+  replaceActivity(std::move(activity));
+}
+
+bool ActivityManager::goToAnkiSync(const bool configureOnly, const bool networkBootReady) {
+#ifndef SIMULATOR
+  if (!configureOnly && !networkBootReady) {
+    silentRestartToNetwork(NetworkBootTarget::ANKI);
+    return true;
+  }
+#else
+  (void)networkBootReady;
+#endif
+  auto activity = makeUniqueNoThrow<AnkiSyncActivity>(renderer, mappedInput, configureOnly);
+  if (!activity) {
+    LOG_ERR("ACT", "OOM opening Anki sync");
+    return false;
+  }
+  replaceActivity(std::move(activity));
+  return true;
+}
+#endif
 
 bool ActivityManager::goToOpdsServer(const uint32_t serverIndex, const bool networkBootReady) {
 #ifndef SIMULATOR

@@ -154,6 +154,10 @@ class ActivityManager {
   void goToLibrary();
   void goToBrowser();
   bool goToOpdsServer(uint32_t serverIndex, bool networkBootReady = false);
+#if CROSSINK_APP_CAP_ANKI
+  void goToAnki();
+  bool goToAnkiSync(bool configureOnly = false, bool networkBootReady = false);
+#endif
   void goToReader(std::string path, bool suppressBackRelease = false, bool allowFastInitialRefresh = false,
                   bool cleanImageBaseOnEntry = false);
   void goToReaderAndRunMenuAction(std::string path, uint8_t action);

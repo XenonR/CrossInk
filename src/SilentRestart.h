@@ -14,6 +14,7 @@ enum class NetworkBootTarget : uint32_t {
   KOREADER_AUTH = 5,
   FILE_TRANSFER = 6,
   MANAGE_FONTS = 7,
+  ANKI = 8,
 };
 
 constexpr bool isNetworkBootTargetValue(const uint32_t value) {
@@ -25,6 +26,12 @@ constexpr bool isNetworkBootTargetValue(const uint32_t value) {
     case NetworkBootTarget::FILE_TRANSFER:
     case NetworkBootTarget::MANAGE_FONTS:
       return true;
+    case NetworkBootTarget::ANKI:
+#if CROSSINK_APP_CAP_ANKI
+      return true;
+#else
+      return false;
+#endif
   }
   return false;
 }
@@ -37,7 +44,15 @@ static_assert(isNetworkBootTargetValue(static_cast<uint32_t>(NetworkBootTarget::
                   isNetworkBootTargetValue(static_cast<uint32_t>(NetworkBootTarget::MANAGE_FONTS)),
               "Every network boot target must pass RTC target validation");
 
-void silentRestart();                                            // home screen
+#if CROSSINK_APP_CAP_ANKI
+static_assert(isNetworkBootTargetValue(static_cast<uint32_t>(NetworkBootTarget::ANKI)),
+              "Anki network boot must pass RTC target validation");
+#endif
+
+void silentRestart();  // home screen
+#if CROSSINK_APP_CAP_ANKI
+void silentRestartToAnki();
+#endif
 void silentRestartToReader(bool cleanImageBaseOnEntry = false);  // currently-open EPUB (APP_STATE.openEpubPath)
 // Reboots immediately after an activity releases exclusive raw storage.
 void restartToHomeAfterStorageHandoff();

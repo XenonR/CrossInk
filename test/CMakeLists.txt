@@ -41,6 +41,7 @@ include(GoogleTest)
 
 add_subdirectory(anki_store)
 add_subdirectory(anki_protocol)
+add_subdirectory(anki_text)
 add_subdirectory(anki_http)
 add_subdirectory(anki_sync)
 

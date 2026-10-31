@@ -128,10 +128,11 @@ bool AnkiStore::validateSnapshot(const char* path, bool adopt) {
          header[32 + header[28]] == 0 && validGeneration(reinterpret_cast<const char*>(header + 32)) &&
          get32(header + 124) == (crc32(header, 124) ^ 0xffffffffU);
   }
-  uint32_t crc = 0;
-  if (ok)
+  if (ok) {
+    uint32_t crc = 0;
     ok = file.size() >= HEADER_BYTES + get16(header + 6) * (CARD_BYTES + DECK_BYTES) && payloadCrc(file, crc) &&
          crc == get32(header + 16);
+  }
   if (file) ok = file.close() && ok;
   if (ok && adopt) {
     memcpy(generation_, header + 32, MAX_GENERATION_BYTES + 1);
@@ -156,14 +157,16 @@ bool AnkiStore::open() {
     // Missing current is the interrupted old->backup/new->current rename window.
     if (!validateSnapshot(BACKUP, false) || !Storage.rename(BACKUP, SNAPSHOT)) {
       LOG_ERR("ANKI", "Snapshot recovery failed");
-      return !(failed_ = true);
+      failed_ = true;
+      return false;
     }
   }
   // A corrupt installed current may own pending reviews; never silently roll it
   // back to an older generation. Keep all files for explicit recovery instead.
   if (!validateSnapshot(SNAPSHOT, true) || !recoverJournal()) {
     LOG_ERR("ANKI", "Anki state needs storage recovery");
-    return !(failed_ = true);
+    failed_ = true;
+    return false;
   }
   return true;
 }

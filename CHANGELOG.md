@@ -1,3 +1,10 @@
+## [Unreleased]
+
+### Added
+
+- Review downloaded Anki text cards offline on X4 Pro, with paged questions and answers, basic bold text, touch and physical controls, and SD-persisted ratings.
+- Manually synchronize due-card batches and reviews with the existing Xteink-Anki desktop add-on (protocols 2 and 3). Downloads preserve the previous batch on failure; uncertain review uploads remain on SD with a recovery report for checking in Anki Desktop.
+
 ## [v1.6.1] - 2026-10-03
 
 ### Added

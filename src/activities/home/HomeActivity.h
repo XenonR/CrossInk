@@ -147,6 +147,11 @@ class HomeActivity final : public Activity {
   void loop() override;
   void render(RenderLock&&) override;
   bool isHomeActivity() const override { return true; }
+#if defined(SIMULATOR) && CROSSINK_APP_CAP_ANKI
+  // Select through the current theme's real menu. Carousel exposes its touch
+  // target because its icon strip intentionally ignores physical Confirm.
+  bool simulatorPrepareAnki(int& touchX, int& touchY);
+#endif
   bool allowPowerAsConfirmInReaderMode() const override { return quickActionsPopup.isActive(); }
   bool blocksGlobalInput() const override { return quickActionsPopup.isActive(); }
   bool handleShortcutAction(CrossPointSettings::SHORT_PWRBTN action) override;
