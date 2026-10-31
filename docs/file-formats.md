@@ -1,5 +1,47 @@
 # File Formats
 
+## `/.crossink-anki/` (Anki version 1)
+
+This directory is persistent application data, separate from disposable reader
+caches. Integers are explicitly encoded little-endian; structures are never
+written using compiler padding. Unsupported versions are retained and rejected.
+
+`cards.bin` has a 128-byte header (`ANK1`, version 1, card/deck counts, file
+length, payload CRC32, generation string and header CRC32). Its card index has
+40-byte records containing signed-positive 64-bit card/deck IDs, 32-bit side
+offsets/lengths and a 16-bit deck ordinal. A reserved 256-byte deck slot per card
+contains the deck ID, card count and up to 240 bytes of UTF-8 name. Remaining
+bytes contain front/back text. Counts are at most 1,000, sides at most 16 KiB.
+
+Import writes `cards.tmp`, verifies its complete payload, and creates its matching
+journal before publication. Replacement renames the installed snapshot to
+`cards.bak`, then the staged file to `cards.bin`. A missing current snapshot can
+recover the backup. A corrupt installed current blocks the feature rather than
+silently reverting a generation that could own unsent reviews. Old journals are
+retained, including the journal matching the backup snapshot.
+
+`reviews-<generation-hash>.log` starts with a 96-byte `ANJ1` header containing
+version, full generation and CRC32. The filename uses the generation's FNV-1a
+64-bit hash; the full header generation must match, so collisions fail closed.
+Each following 64-byte `AEV1` record has a type, review sequence/ordinal, rating,
+duration, card ID, optional UTC milliseconds, prepared batch range and CRC32.
+Types record ratings, prepared uploads, attempted uploads, acknowledgments,
+uncertain outcomes, and explicit manual resolutions. Uploads are chronological
+ranges of at most 32 reviews. Batch IDs derive from generation hash and range.
+
+A rating becomes visible as accepted only after checked write/sync/close.
+Attempt state is persisted before HTTP I/O; replay pauses any attempt lacking a
+durable acknowledgment or manual resolution. Acknowledged reviews remain
+reviewed within the snapshot. A missing journal or corruption inside it blocks
+review. Incomplete final bytes can be repaired through a synced temporary prefix
+and preserved damaged original. Fully sized checksum-invalid records are retained
+for recovery rather than silently dropped.
+
+`recovery-<batch-id>.ndjson` is a readable report of uncertain reviews. Marking
+reviews handled records a manual resolution while retaining the original journal
+and report. FAT renames do not guarantee physical atomicity; power-cut hardware
+tests remain necessary. See [Anki setup and protocol](anki.md).
+
 These formats describe the SD-card cache files under `/.crosspoint/epub_<hash>/`.
 All POD fields are written in the ESP32 little-endian representation used by
 `Serialization.h`; strings are length-prefixed UTF-8 unless a format notes a

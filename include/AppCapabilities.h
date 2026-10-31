@@ -1,5 +1,10 @@
 #pragma once
 
+// Anki is an opt-in application feature, independent of touch and USB support.
+#ifndef CROSSINK_APP_CAP_ANKI
+#define CROSSINK_APP_CAP_ANKI 0
+#endif
+
 // The app deliberately has a build-time touch capability, separate from a
 // runtime probe. Button-only images must not retain the touch UI merely because
 // the shared source tree also builds for Sticky.
