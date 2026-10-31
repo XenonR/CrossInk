@@ -15,6 +15,15 @@
 #include <filesystem>
 
 #include "CrossPointState.h"
+#if CROSSINK_APP_CAP_ANKI
+#include <WiFi.h>
+
+#include "activities/anki/AnkiHomeActivity.h"
+#include "activities/anki/AnkiReviewActivity.h"
+#include "activities/anki/AnkiSyncActivity.h"
+#include "anki/AnkiConnectionStore.h"
+#include "anki/AnkiStore.h"
+#endif
 #if CROSSINK_SCALABLE_FONTS
 #include <Epub/parsers/ChapterHtmlSlimParser.h>
 #include <HalScalableFont.h>
@@ -2866,10 +2875,479 @@ class SimulatorSmokeTest {
   }
 };
 
+#if CROSSINK_APP_CAP_ANKI
+// This opt-in scenario runs only against the runner's temporary SD directory.
+// Inputs use the regular activity loop; simulator accessors only inspect state
+// and locate controls whose geometry depends on theme, scale and orientation.
+class AnkiSimulatorSmokeTest {
+ public:
+  void tick() {
+    mappedInputManager.simulatorClearInputFrame();
+    if (waitFrames > 0) {
+      if (--waitFrames == 0 && activityManager.requestUpdateAndWait() != RequestUpdateResult::Rendered)
+        fail("Render rejected");
+      return;
+    }
+    switch (step) {
+      case Step::Start:
+        if (!mappedInputManager.hasHomeKey() || !mappedInputManager.hasTouchHardware())
+          fail("Anki smoke requires the X4 Pro simulator");
+        {
+          RenderLock lock;
+          SETTINGS.uiTheme = CrossPointSettings::CLASSIC;
+          SETTINGS.uiScale = CrossPointSettings::UI_SCALE_SMALL;
+          SETTINGS.disableReaderTouchscreen = false;
+          UITheme::getInstance().reload();
+        }
+        if (std::strcmp(std::getenv("CROSSINK_SIMULATOR_ANKI_SMOKE"), "restart") == 0) {
+          checkPending(4, 1);
+          anki::AnkiStore store;
+          anki::UploadBatch batch;
+          if (!store.open() || !store.prepareUpload(batch) || batch.count != 4) fail("Restart lost ratings");
+          for (uint8_t i = 0; i < 4; ++i)
+            if (batch.reviews[i].cardId != 7000 + i || batch.reviews[i].ease != i + 1)
+              fail("Restart changed rating identity or ease");
+          restart = true;
+          activityManager.goToAnki();
+          advance(Step::SelectDeckFirst);
+        } else if (std::strcmp(std::getenv("CROSSINK_SIMULATOR_ANKI_SMOKE"), "sync") == 0) {
+          checkPending(5, 0);
+          const char* url = std::getenv("CROSSINK_SIMULATOR_ANKI_SERVER");
+          if (!url || !anki::AnkiConnectionStore::save({url, "anki-smoke-token"}))
+            fail("Cannot save test connection through the credential store");
+          if (WiFi.begin("Anki smoke test") != WL_CONNECTED) fail("Simulator Wi-Fi did not connect");
+          activityManager.goToAnki();
+          advance(Step::SyncHome);
+        } else {
+          createSnapshot();
+          openTheme();
+        }
+        break;
+      case Step::ThemeHome: {
+        auto* home = dynamic_cast<HomeActivity*>(activityManager.simulatorCurrentActivity());
+        if (!home) fail("Expected themed Home");
+        int x, y;
+        {
+          RenderLock lock;
+          if (!home->simulatorPrepareAnki(x, y)) fail("Home theme lacks Anki destination");
+        }
+        if (x >= 0)
+          tap(x, y, Step::ThemeDecks);
+        else
+          button(MappedInputManager::Button::Confirm, Step::ThemeDecks);
+        break;
+      }
+      case Step::ThemeDecks:
+        requireActivity("AnkiHome");
+        LOG_INF("ANKI-SMOKE", "Home theme %u opens Anki", theme);
+        if (++theme < CrossPointSettings::UI_THEME_COUNT)
+          openTheme();
+        else {
+          {
+            RenderLock lock;
+            SETTINGS.uiTheme = CrossPointSettings::CLASSIC;
+            UITheme::getInstance().reload();
+          }
+          activityManager.goToAnki();
+          advance(Step::SelectDeckFirst);
+        }
+        break;
+      case Step::SelectDeckFirst:
+        requireActivity("AnkiHome");
+        button(MappedInputManager::Button::Down, Step::SelectDeckSecond);
+        break;
+      case Step::SelectDeckSecond:
+        button(MappedInputManager::Button::Down, Step::OpenDeck);
+        break;
+      case Step::OpenDeck:
+        button(MappedInputManager::Button::Confirm, restart ? Step::RestartReview : Step::Question);
+        break;
+      case Step::Question: {
+        const auto state = review().simulatorState();
+        if (state.cardOrdinal != 0 || state.answer || state.error || !state.hasMore || !review().simulatorPageHasBold())
+          fail("Long Unicode/bold question did not render");
+        capture("question");
+        button(MappedInputManager::Button::Down, Step::QuestionNext);
+        break;
+      }
+      case Step::QuestionNext:
+        if (review().simulatorState().pageNumber != 1 || review().simulatorState().answer ||
+            !review().simulatorPageHasBold())
+          fail("Side button did not page, preserving bold");
+        button(MappedInputManager::Button::Up, Step::QuestionPrevious);
+        break;
+      case Step::QuestionPrevious:
+        if (review().simulatorState().pageNumber != 0) fail("Previous page did not return");
+        swipe(renderer.getScreenWidth() * 3 / 4, renderer.getScreenHeight() / 2, renderer.getScreenWidth() / 4,
+              renderer.getScreenHeight() / 2, Step::QuestionSwiped);
+        break;
+      case Step::QuestionSwiped:
+        if (review().simulatorState().pageNumber != 1) fail("Swipe did not page");
+        {
+          RenderLock lock;
+          renderer.setOrientation(GfxRenderer::LandscapeClockwise);
+        }
+        advance(Step::Landscape);
+        break;
+      case Step::Landscape:
+        if (review().simulatorState().pageNumber != 0 || !review().simulatorState().hasMore)
+          fail("Orientation change did not relayout the card");
+        {
+          RenderLock lock;
+          renderer.setOrientation(GfxRenderer::Portrait);
+        }
+        advance(Step::Reveal);
+        break;
+      case Step::Reveal:
+        button(MappedInputManager::Button::Confirm, Step::Answer);
+        break;
+      case Step::Answer:
+        if (!review().simulatorState().answer || review().simulatorState().selectingRating)
+          fail("Question Confirm must only reveal answer");
+        capture("answer");
+        button(MappedInputManager::Button::Confirm, Step::RatingSelector);
+        break;
+      case Step::RatingSelector:
+        if (!review().simulatorState().selectingRating || review().simulatorState().cardOrdinal != 0)
+          fail("Answer Confirm must open the rating selector without grading");
+        checkPending(0, 5);
+        button(MappedInputManager::Button::Up, Step::AgainSelection);
+        break;
+      case Step::AgainSelection:
+        button(MappedInputManager::Button::Up, Step::GradeAgain);
+        break;
+      case Step::GradeAgain:
+        button(MappedInputManager::Button::Confirm, Step::CardOne);
+        break;
+      case Step::CardOne:
+        checkCard(1);
+        checkPending(1, 4);
+        tapAction(2, Step::HardAnswer);
+        break;
+      case Step::HardAnswer:
+        if (!review().simulatorState().answer) fail("Touch did not reveal answer");
+        tapAction(4, Step::CardTwo);
+        break;
+      case Step::CardTwo:
+        checkCard(2);
+        checkPending(2, 3);
+        button(MappedInputManager::Button::Confirm, Step::GoodAnswer);
+        break;
+      case Step::GoodAnswer:
+        tapAction(5, Step::CardThree);
+        break;
+      case Step::CardThree:
+        checkCard(3);
+        checkPending(3, 2);
+        tapAction(2, Step::EasyAnswer);
+        break;
+      case Step::EasyAnswer:
+        tapAction(6, Step::CardFour);
+        break;
+      case Step::CardFour:
+        checkCard(4);
+        checkPending(4, 1);
+        button(MappedInputManager::Button::Confirm, Step::BlockJournal);
+        break;
+      case Step::BlockJournal:
+        for (const auto& entry : std::filesystem::directory_iterator("fs_/.crossink-anki")) {
+          if (entry.path().extension() == ".log") {
+            blockedJournal = entry.path();
+            break;
+          }
+        }
+        if (blockedJournal.empty()) fail("Review journal missing");
+        std::filesystem::rename(blockedJournal, blockedJournal.string() + ".blocked");
+        std::filesystem::create_directory(blockedJournal);
+        tapAction(5, Step::SaveFailed);
+        break;
+      case Step::SaveFailed:
+        if (!review().simulatorState().error || review().simulatorState().cardOrdinal != 4)
+          fail("Failed SD append must keep the current card ungraded");
+        std::filesystem::remove(blockedJournal);
+        std::filesystem::rename(blockedJournal.string() + ".blocked", blockedJournal);
+        button(MappedInputManager::Button::Back, Step::AfterFailure);
+        break;
+      case Step::AfterFailure:
+        requireActivity("AnkiHome");
+        checkPending(4, 1);
+        activityManager.goToReader(bookPath(), true);
+        advance(Step::ReaderReturned, 8);
+        break;
+      case Step::ReaderReturned:
+        requireActivity("EpubReader");
+        LOG_INF("ANKI-SMOKE", "Anki simulator smoke passed: themes, paging, bold, ratings, SD failure and EPUB");
+        std::_Exit(0);
+      case Step::RestartReview:
+        checkCard(4);
+        checkPending(4, 1);
+        swipe(renderer.getScreenWidth() / 2, 8, renderer.getScreenWidth() / 2, renderer.getScreenHeight() / 4,
+              Step::FrontlightOpened);
+        break;
+      case Step::FrontlightOpened:
+        requireActivity("FrontlightPanel");
+        button(MappedInputManager::Button::Back, Step::FrontlightReturned);
+        break;
+      case Step::FrontlightReturned:
+        checkCard(4);
+        button(MappedInputManager::Button::Confirm, Step::RestartAnswer);
+        break;
+      case Step::RestartAnswer:
+        button(MappedInputManager::Button::Confirm, Step::RestartRating);
+        break;
+      case Step::RestartRating:
+        if (!review().simulatorState().selectingRating) fail("Restart rating selector missing");
+        button(MappedInputManager::Button::Confirm, Step::Completed);
+        break;
+      case Step::Completed:
+        if (!review().simulatorState().done) fail("Completed batch did not show completion");
+        checkPending(5, 0);
+        button(MappedInputManager::Button::Back, Step::RestartDone);
+        break;
+      case Step::RestartDone:
+        requireActivity("AnkiHome");
+        checkPending(5, 0);
+        LOG_INF("ANKI-SMOKE",
+                "Anki simulator restart passed: persisted ratings, remaining card, frontlight and completion");
+        std::_Exit(0);
+      case Step::SyncHome:
+        requireActivity("AnkiHome");
+        initialHandles = countHostEntries("/proc/self/fd");
+        initialThreads = countHostEntries("/proc/self/task");
+        button(MappedInputManager::Button::Down, Step::SyncConnection);
+        break;
+      case Step::SyncConnection:
+        button(MappedInputManager::Button::Confirm, Step::SyncConfiguration);
+        break;
+      case Step::SyncConfiguration: {
+        if (!syncState().configureOnly) fail("Home Connection did not open configuration mode");
+        button(MappedInputManager::Button::Down, Step::SyncSelectNow);
+        break;
+      }
+      case Step::SyncSelectNow:
+        button(MappedInputManager::Button::Down, Step::SyncLaunch);
+        break;
+      case Step::SyncLaunch:
+        button(MappedInputManager::Button::Confirm, Step::SyncWait);
+        break;
+      case Step::SyncWait: {
+        const auto state = syncState();
+        if (state.configureOnly) fail("Connection Sync Now bypassed the sync activity transition");
+        if (state.running || !state.hasOutcome) {
+          advance(Step::SyncWait, 1);
+          break;
+        }
+        if (state.outcome != anki::SyncResult::Success) fail("Worker/HTTP synchronization did not succeed");
+        anki::AnkiStore store;
+        const char* generation = std::getenv("CROSSINK_SIMULATOR_ANKI_GENERATION");
+        if (!generation || !store.open() || !store.hasSnapshot() || store.failed() || store.needsAttention() ||
+            store.pendingCount() != 0 || store.cardCount() != 0 || store.deckCount() != 0 ||
+            std::strcmp(store.generation(), generation))
+          fail("Sync did not retire reviews and install the empty due-card snapshot");
+        button(MappedInputManager::Button::Back, Step::SyncReturned);
+        break;
+      }
+      case Step::SyncReturned:
+        requireActivity("AnkiHome");
+        if (WiFi.getMode() != WIFI_OFF || WiFi.status() == WL_CONNECTED) fail("Sync exit left Wi-Fi enabled");
+        if ((initialHandles && countHostEntries("/proc/self/fd") > initialHandles) ||
+            (initialThreads && countHostEntries("/proc/self/task") > initialThreads))
+          fail("Sync exit retained an HTTP handle or worker thread");
+        LOG_INF("ANKI-SMOKE",
+                "Anki simulator sync passed: configuration route, worker HTTP, receipts and network teardown");
+        std::_Exit(0);
+      case Step::TouchRelease:
+        mappedInputManager.simulatorInjectTouchRelease(touchX, touchY);
+        advance(afterTouch);
+        break;
+      case Step::SwipeMove:
+        mappedInputManager.simulatorInjectTouchMove(touchX, touchY);
+        step = Step::TouchRelease;
+        break;
+    }
+  }
+
+ private:
+  enum class Step {
+    Start,
+    ThemeHome,
+    ThemeDecks,
+    SelectDeckFirst,
+    SelectDeckSecond,
+    OpenDeck,
+    Question,
+    QuestionNext,
+    QuestionPrevious,
+    QuestionSwiped,
+    Landscape,
+    Reveal,
+    Answer,
+    RatingSelector,
+    AgainSelection,
+    GradeAgain,
+    CardOne,
+    HardAnswer,
+    CardTwo,
+    GoodAnswer,
+    CardThree,
+    EasyAnswer,
+    CardFour,
+    BlockJournal,
+    SaveFailed,
+    AfterFailure,
+    ReaderReturned,
+    RestartReview,
+    FrontlightOpened,
+    FrontlightReturned,
+    RestartAnswer,
+    RestartRating,
+    Completed,
+    RestartDone,
+    SyncHome,
+    SyncConnection,
+    SyncConfiguration,
+    SyncSelectNow,
+    SyncLaunch,
+    SyncWait,
+    SyncReturned,
+    TouchRelease,
+    SwipeMove
+  };
+  Step step = Step::Start;
+  Step afterTouch = Step::Start;
+  int waitFrames = 0;
+  int touchX = 0, touchY = 0;
+  uint8_t theme = 0;
+  bool restart = false;
+  size_t initialHandles = 0;
+  size_t initialThreads = 0;
+  std::filesystem::path blockedJournal;
+
+  [[noreturn]] static void fail(const char* message) {
+    LOG_ERR("ANKI-SMOKE", "%s", message);
+    std::_Exit(2);
+  }
+  static const char* bookPath() {
+    const char* path = std::getenv("CROSSINK_SIMULATOR_SMOKE_BOOK");
+    if (!path || !*path) fail("EPUB fixture path missing");
+    return path;
+  }
+  static void requireActivity(const char* name) {
+    if (!activityManager.isCurrentActivityNamed(name)) {
+      LOG_ERR("ANKI-SMOKE", "Expected %s", name);
+      std::_Exit(2);
+    }
+  }
+  static AnkiReviewActivity& review() {
+    auto* activity = dynamic_cast<AnkiReviewActivity*>(activityManager.simulatorCurrentActivity());
+    if (!activity) fail("Expected AnkiReview");
+    return *activity;
+  }
+  static AnkiSyncActivity::SimulatorState syncState() {
+    auto* activity = dynamic_cast<AnkiSyncActivity*>(activityManager.simulatorCurrentActivity());
+    if (!activity) fail("Expected AnkiSync");
+    RenderLock lock;
+    return activity->simulatorState();
+  }
+  static size_t countHostEntries(const char* directory) {
+    if (!std::filesystem::exists(directory)) return 0;
+    return static_cast<size_t>(
+        std::distance(std::filesystem::directory_iterator(directory), std::filesystem::directory_iterator{}));
+  }
+  static void checkCard(uint16_t ordinal) {
+    const auto state = review().simulatorState();
+    if (state.cardOrdinal != ordinal || state.answer || state.done || state.error) fail("Wrong next unreviewed card");
+  }
+  static void checkPending(uint16_t pending, uint16_t remaining) {
+    anki::AnkiStore store;
+    anki::Deck deck;
+    if (!store.open() || !store.readDeck(0, deck) || store.pendingCount() != pending || deck.remaining != remaining)
+      fail("Durable pending/remaining counts differ from UI progress");
+  }
+  void advance(Step next, int frames = 3) {
+    step = next;
+    waitFrames = frames;
+  }
+  void button(MappedInputManager::Button button, Step next) {
+    mappedInputManager.simulatorInjectRelease(button);
+    advance(next);
+  }
+  void tap(int x, int y, Step next) {
+    touchX = x;
+    touchY = y;
+    afterTouch = next;
+    mappedInputManager.simulatorInjectTouchDown(x, y);
+    step = Step::TouchRelease;
+  }
+  void tapAction(int action, Step next) {
+    const auto rect = review().simulatorActionRect(action);
+    if (rect.width <= 0 || rect.height <= 0) fail("Missing action target");
+    tap(rect.x + rect.width / 2, rect.y + rect.height / 2, next);
+  }
+  void swipe(int startX, int startY, int endX, int endY, Step next) {
+    mappedInputManager.simulatorInjectTouchDown(startX, startY);
+    touchX = endX;
+    touchY = endY;
+    afterTouch = next;
+    step = Step::SwipeMove;
+  }
+  void openTheme() {
+    {
+      RenderLock lock;
+      SETTINGS.uiTheme = theme;
+      UITheme::getInstance().reload();
+    }
+    activityManager.goHome();
+    advance(Step::ThemeHome, 5);
+  }
+  static void createSnapshot() {
+    anki::AnkiStore store;
+    if (!store.open() || !store.beginSnapshot("anki-smoke-v1", 5)) fail("Cannot stage smoke snapshot");
+    // Construct large text only in simulator memory; firmware review still
+    // owns just one bounded side buffer. Bold spans cross page boundaries.
+    std::string front = "\x02";
+    for (int i = 0; i < 100; ++i) front += "Unicode Grüße café. A long question remains readable across pages. ";
+    front += "\x03 end";
+    const char* back =
+        "Prepared \x02"
+        "bold answer\x03\n\x04table c=2 r=1 f=H\nhead\x06value\n\x04/table\nEnd.";
+    for (int i = 0; i < 5; ++i) {
+      const char* question = i == 0 ? front.c_str() : "Question";
+      const anki::CardInput card{7000 + i,         77, "Anki smoke deck", question, back, std::strlen(question),
+                                 std::strlen(back)};
+      if (!store.appendCard(card)) fail("Cannot append smoke card");
+    }
+    if (!store.commitSnapshot()) fail("Cannot activate smoke snapshot");
+  }
+  static void capture(const char* name) {
+    const char* directory = std::getenv("CROSSINK_SIMULATOR_ANKI_CAPTURES");
+    if (!directory) return;
+    const auto path = std::filesystem::path(directory) / (std::string(name) + ".pgm");
+    FILE* image = std::fopen(path.c_str(), "wb");
+    if (!image) fail("Cannot save card capture");
+    RenderLock lock;
+    const int width = renderer.getScreenWidth(), height = renderer.getScreenHeight();
+    std::fprintf(image, "P5\n%d %d\n255\n", width, height);
+    for (int y = 0; y < height; ++y)
+      for (int x = 0; x < width; ++x) std::fputc(renderer.isPixelBlack(x, y) ? 0 : 255, image);
+    std::fclose(image);
+  }
+};
+AnkiSimulatorSmokeTest ankiSmokeTest;
+#endif
+
 SimulatorSmokeTest smokeTest;
 
 }  // namespace
 
-void runSimulatorSmokeTestTick() { smokeTest.tick(); }
+void runSimulatorSmokeTestTick() {
+#if CROSSINK_APP_CAP_ANKI
+  if (std::getenv("CROSSINK_SIMULATOR_ANKI_SMOKE")) {
+    ankiSmokeTest.tick();
+    return;
+  }
+#endif
+  smokeTest.tick();
+}
 
 #endif

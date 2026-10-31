@@ -68,7 +68,7 @@ def run_smoke(args: argparse.Namespace) -> int:
     if args.build:
         build_simulator(args.env)
 
-    program = program_path(args.env)
+    program = Path(args.program).resolve() if args.program else program_path(args.env)
     if not program.exists():
         print(f"Simulator binary not found: {program}", file=sys.stderr)
         print(f"Run: pio run -e {args.env}", file=sys.stderr)
@@ -144,6 +144,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--book", default=str(DEFAULT_BOOK), help="EPUB fixture to copy into the isolated simulator fs_")
     parser.add_argument("--env", choices=("simulator", "simulator-X3", "x4-classic-simulator", "sticky-simulator", "x4-pro-simulator"), default="simulator",
                         help="PlatformIO simulator environment to build and run")
+    parser.add_argument("--program", help="Run this simulator binary (use with --no-build for a custom build directory)")
     parser.add_argument("--font-dir", help="Font fixtures copied into isolated /fonts")
     parser.add_argument("--font-family", help="Exercise custom-font size and dictionary lifecycle")
     parser.add_argument("--timeout", type=int, help="Seconds before the simulator run is treated as hung (default: 45, or 180 for frontlight layout)")

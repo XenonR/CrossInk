@@ -339,6 +339,44 @@ TEST_F(StoreTest, EveryJournalRepairCheckpointKeepsAllAcceptedReviewsAndEarlierE
     EXPECT_FALSE(restarted.nextUnreviewed(2, 0, remaining));
   }
 }
+TEST_F(StoreTest, MaximumDeckAndCardCountsPreserveLastOrdinalAndFullSide) {
+  anki::AnkiStore store;
+  ASSERT_TRUE(store.open());
+  ASSERT_TRUE(store.beginSnapshot("maximum-snapshot", anki::MAX_CARDS));
+  const std::string fullSide(anki::MAX_SIDE_BYTES, 'x');
+  for (uint16_t i = 0; i < anki::MAX_CARDS; ++i) {
+    const bool last = i + 1 == anki::MAX_CARDS;
+    const anki::CardInput card{int64_t(10000 + i),
+                               int64_t(20000 + i),
+                               "Deck",
+                               last ? fullSide.c_str() : "Q",
+                               "A",
+                               last ? fullSide.size() : size_t(1),
+                               1};
+    ASSERT_TRUE(store.appendCard(card)) << i;
+  }
+  ASSERT_TRUE(store.commitSnapshot());
+  ASSERT_EQ(store.cardCount(), anki::MAX_CARDS);
+  ASSERT_EQ(store.deckCount(), anki::MAX_DECKS);
+  anki::Deck deck;
+  ASSERT_TRUE(store.readDeck(anki::MAX_DECKS - 1, deck));
+  EXPECT_EQ(deck.deckId, 20000 + anki::MAX_DECKS - 1);
+  EXPECT_EQ(deck.remaining, 1);
+  std::string side(anki::MAX_SIDE_BYTES + 1, '\0');
+  ASSERT_TRUE(store.readSide(anki::MAX_CARDS - 1, false, side.data(), side.size()));
+  EXPECT_EQ(std::string(side.c_str()), fullSide);
+  ASSERT_TRUE(store.recordReview(anki::MAX_CARDS - 1, 4, 42));
+  ASSERT_TRUE(store.open());
+  ASSERT_EQ(store.pendingCount(), 1);
+  anki::CardInfo next;
+  EXPECT_FALSE(store.nextUnreviewed(deck.deckId, 0, next));
+  EXPECT_FALSE(store.failed());
+  anki::UploadBatch upload;
+  ASSERT_TRUE(store.prepareUpload(upload));
+  EXPECT_EQ(upload.reviews[0].ordinal, anki::MAX_CARDS - 1);
+  EXPECT_EQ(upload.reviews[0].cardId, 10000 + anki::MAX_CARDS - 1);
+}
+
 TEST_F(StoreTest, BoundsAndCorruptionRejectWithoutReadingOutsideFiles) {
   anki::AnkiStore store;
   ASSERT_TRUE(store.open());
