@@ -1,6 +1,6 @@
 # File Formats
 
-## `/.crossink-anki/` (Anki version 1)
+## `/.crossink-anki/` (snapshot version 1, journal versions 1–2)
 
 This directory is persistent application data, separate from disposable reader
 caches. Integers are explicitly encoded little-endian; structures are never
@@ -21,7 +21,7 @@ silently reverting a generation that could own unsent reviews. Old journals are
 retained, including the journal matching the backup snapshot.
 
 `reviews-<generation-hash>.log` starts with a 96-byte `ANJ1` header containing
-version, full generation and CRC32. The filename uses the generation's FNV-1a
+version (currently 2), full generation and CRC32. The filename uses the generation's FNV-1a
 64-bit hash; the full header generation must match, so collisions fail closed.
 Each following 64-byte `AEV1` record has a type, review sequence/ordinal, rating,
 duration, card ID, optional UTC milliseconds, prepared batch range and CRC32.
@@ -29,10 +29,26 @@ Types record ratings, prepared uploads, attempted uploads, acknowledgments,
 uncertain outcomes, and explicit manual resolutions. Uploads are chronological
 ranges of at most 32 reviews. Batch IDs derive from generation hash and range.
 
+Version 2 adds event type 7, a deck restart, with the signed-positive 64-bit deck
+ID at bytes 48–55. Its CRC remains at bytes 60–63; record and header sizes are
+unchanged. A restart requires an existing, nonempty, completed deck and no
+unresolved upload. It clears only that deck's reviewed bits. Later rating events
+reuse card ordinals with new, monotonically increasing review sequences, so every
+pass is uploaded in order. Ratings within a pass cannot be duplicated. Pending
+review counts are 32-bit; sequence/file-size overflow is rejected.
+
+Version 1 journals remain readable and support ordinary ratings/uploads. Before
+their first restart, the valid journal is copied to a synced `.tmp` with a version
+2 header and recalculated header CRC. The original is renamed to `.damaged`
+(preserving an existing original under a numbered suffix), then the temporary
+file is activated. If power interrupts the rename window, normal journal recovery
+restores the original. Review sequences, payloads and batch IDs do not change.
+Older firmware rejects version 2; retain the data when downgrading.
+
 A rating becomes visible as accepted only after checked write/sync/close.
 Attempt state is persisted before HTTP I/O; replay pauses any attempt lacking a
 durable acknowledgment or manual resolution. Acknowledged reviews remain
-reviewed within the snapshot. A missing journal or corruption inside it blocks
+reviewed until an explicit deck restart. A missing journal or corruption inside it blocks
 review. Incomplete final bytes can be repaired through a synced temporary prefix
 and preserved damaged original. Fully sized checksum-invalid records are retained
 for recovery rather than silently dropped.

@@ -19,7 +19,7 @@ class AnkiStore {
   bool hasSnapshot() const { return generation_[0] != '\0'; }
   uint16_t cardCount() const { return cardCount_; }
   uint16_t deckCount() const { return deckCount_; }
-  uint16_t pendingCount() const { return pendingCount_; }
+  uint32_t pendingCount() const { return pendingCount_; }
   bool needsAttention() const { return attention_; }
   bool failed() const { return failed_; }
   const char* generation() const { return generation_; }
@@ -29,6 +29,8 @@ class AnkiStore {
   // Returns false without failed() when the selected deck has no remaining cards.
   bool nextUnreviewed(int64_t deckId, uint16_t start, CardInfo& out);
   bool recordReview(uint16_t ordinal, uint8_t ease, uint32_t durationMs, uint64_t answeredAtMs = 0);
+  // Start another pass only after every card in this deck has been rated.
+  bool restartDeck(int64_t deckId);
 
   bool beginSnapshot(const char* generation, uint16_t count);
   bool appendCard(const CardInput& card);
@@ -47,22 +49,29 @@ class AnkiStore {
   struct ImportState;
   std::unique_ptr<ImportState> import_;
   char generation_[MAX_GENERATION_BYTES + 1] = {};
-  std::array<uint8_t, (MAX_CARDS + 7) / 8> reviewed_{};
+  using ReviewedBits = std::array<uint8_t, (MAX_CARDS + 7) / 8>;
+  ReviewedBits reviewed_{};
   uint16_t cardCount_ = 0;
   uint16_t deckCount_ = 0;
-  uint16_t pendingCount_ = 0;
+  uint16_t journalVersion_ = 0;
+  uint32_t pendingCount_ = 0;
   uint32_t nextSequence_ = 1;
   uint32_t acknowledgedThrough_ = 0;
   uint32_t preparedFirst_ = 0;
+  // Transient sequential reader; never stores the journal or a card list in RAM.
+  uint32_t reviewReadOffset_ = 96;
+  uint32_t reviewReadSequence_ = 1;
   uint8_t preparedCount_ = 0;
   bool attempted_ = false;
   bool attention_ = false;
   bool failed_ = false;
-  bool appendEvent(uint8_t type, const Review* review = nullptr);
+  bool appendEvent(uint8_t type, const Review* review = nullptr, int64_t deckId = 0);
+  bool completedDeckMask(int64_t deckId, ReviewedBits& mask);
+  bool upgradeJournal();
   bool recoverJournal();
   bool validateSnapshot(const char* path, bool adopt);
   bool readReview(uint32_t sequence, Review& out);
-  bool repairJournal(size_t validBytes);
+  bool repairJournal(size_t validBytes, bool upgrade = false);
   void journalPath(char* out, size_t capacity) const;
   void batchId(char* out, size_t capacity) const;
 };

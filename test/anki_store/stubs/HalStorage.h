@@ -14,6 +14,7 @@ class HalFile;
 struct TestStorage {
   using Files = std::map<std::string, std::vector<uint8_t>>;
   Files files;
+  size_t bytesRead = 0;
   bool captureCheckpoints = false;
   std::vector<Files> checkpoints;
   std::map<std::string, int> handles;
@@ -80,6 +81,7 @@ class HalFile {
   int read(void* out, size_t n) {
     if (!*this || !Storage.operation() || pos_ > size()) return -1;
     n = std::min(n, size() - pos_);
+    Storage.bytesRead += n;
     if (n) memcpy(out, Storage.files[path_].data() + pos_, n);
     pos_ += n;
     return n;

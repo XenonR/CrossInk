@@ -155,6 +155,27 @@ TEST_F(SyncTest, PartiallyAppliedBatchPreservesEveryReviewForManualReconciliatio
   EXPECT_TRUE(replies.empty());
 }
 
+TEST_F(SyncTest, RepeatedPassesReachDesktopInOrderAcrossBatchBoundaries) {
+  install(20);
+  for (int pass = 0; pass < 2; ++pass) {
+    if (pass) {
+      ASSERT_TRUE(store.restartDeck(1));
+    }
+    for (uint16_t i = 0; i < 20; ++i) ASSERT_TRUE(store.recordReview(i, pass + 2, 100 + i));
+  }
+  ASSERT_TRUE(store.open());
+  replies = {{"/health", HEALTH},
+             {"/push", "success"},
+             {"/push", "success"},
+             {"/pull?max_cards=250&max_total=1000", snapshot("new", 0)}};
+  EXPECT_EQ(client.run(CONNECTION), anki::SyncResult::Success);
+  EXPECT_EQ(batchSizes, (std::vector<size_t>{32, 8}));
+  ASSERT_EQ(uploadedCards.size(), size_t{40});
+  for (size_t i = 0; i < uploadedCards.size(); ++i) EXPECT_EQ(uploadedCards[i], 100 + i % 20);
+  EXPECT_EQ(store.pendingCount(), 0U);
+  EXPECT_EQ(store.cardCount(), 0);
+}
+
 TEST_F(SyncTest, LostPushResponseRetainsReviewsAndNeverAutomaticallyRetries) {
   queueReview();
   replies = {{"/health", HEALTH}, {"/push", "", HttpDownloader::HTTP_ERROR}};

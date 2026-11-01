@@ -3,6 +3,16 @@
 #include "AnkiStore.h"
 
 namespace {
+void checksum(std::vector<uint8_t>& bytes, const size_t offset, const size_t length) {
+  uint32_t crc = 0xffffffffU;
+  for (size_t i = offset; i < offset + length; ++i) {
+    crc ^= bytes[i];
+    for (int bit = 0; bit < 8; ++bit) crc = (crc >> 1) ^ (0xedb88320U & (0U - (crc & 1U)));
+  }
+  crc ^= 0xffffffffU;
+  for (int i = 0; i < 4; ++i) bytes[offset + length + i] = crc >> (i * 8);
+}
+
 class StoreTest : public ::testing::Test {
  protected:
   void SetUp() override { Storage = {}; }
@@ -19,6 +29,12 @@ class StoreTest : public ::testing::Test {
     for (const auto& [path, bytes] : Storage.files)
       if (path.ends_with(".log")) return path;
     return {};
+  }
+  void useVersionOneJournal() {
+    auto& bytes = Storage.files[journal()];
+    bytes[4] = 1;
+    bytes[5] = 0;
+    checksum(bytes, 0, 92);
   }
 };
 TEST_F(StoreTest, EmptyStoreAndSnapshotRoundTrip) {
@@ -385,5 +401,241 @@ TEST_F(StoreTest, BoundsAndCorruptionRejectWithoutReadingOutsideFiles) {
   ASSERT_TRUE(install(store));
   Storage.files["/.crossink-anki/cards.bin"][4] = 9;
   EXPECT_FALSE(store.open());
+}
+
+TEST_F(StoreTest, RepeatsCompletedDecksIndependentlyAndResumesPartialPasses) {
+  anki::AnkiStore store;
+  ASSERT_TRUE(store.open());
+  ASSERT_TRUE(install(store));
+  EXPECT_FALSE(store.restartDeck(0));
+  EXPECT_FALSE(store.restartDeck(99));
+  EXPECT_FALSE(store.restartDeck(1));
+  ASSERT_TRUE(store.recordReview(0, 1, 10));
+  EXPECT_FALSE(store.restartDeck(1));
+  ASSERT_TRUE(store.recordReview(2, 2, 20));
+  ASSERT_TRUE(store.recordReview(1, 3, 30));
+  ASSERT_TRUE(store.restartDeck(1));
+  ASSERT_TRUE(store.recordReview(0, 4, 40));
+  EXPECT_FALSE(store.recordReview(0, 3, 50));
+  ASSERT_TRUE(store.open());
+  EXPECT_EQ(store.pendingCount(), 4U);
+  anki::CardInfo card;
+  ASSERT_TRUE(store.nextUnreviewed(1, 0, card));
+  EXPECT_EQ(card.ordinal, 2);
+  EXPECT_FALSE(store.nextUnreviewed(2, 0, card));
+  EXPECT_FALSE(store.restartDeck(1));
+  ASSERT_TRUE(store.recordReview(2, 3, 50));
+  ASSERT_TRUE(store.restartDeck(2));
+  ASSERT_TRUE(store.recordReview(1, 2, 60));
+  ASSERT_TRUE(store.open());
+  EXPECT_EQ(store.pendingCount(), 6U);
+  anki::UploadBatch batch;
+  ASSERT_TRUE(store.prepareUpload(batch));
+  ASSERT_EQ(batch.count, 6);
+  const int64_t ids[] = {100, 102, 101, 100, 102, 101};
+  const uint8_t ratings[] = {1, 2, 3, 4, 3, 2};
+  for (size_t i = 0; i < batch.count; ++i) {
+    EXPECT_EQ(batch.reviews[i].sequence, i + 1);
+    EXPECT_EQ(batch.reviews[i].cardId, ids[i]);
+    EXPECT_EQ(batch.reviews[i].ease, ratings[i]);
+    EXPECT_EQ(batch.reviews[i].durationMs, (i + 1) * 10);
+  }
+}
+
+TEST_F(StoreTest, EmptyAndUncertainDecksCannotRestart) {
+  anki::AnkiStore store;
+  ASSERT_TRUE(store.open());
+  EXPECT_FALSE(store.restartDeck(1));
+  ASSERT_TRUE(install(store, "empty", 0));
+  EXPECT_FALSE(store.restartDeck(1));
+  ASSERT_TRUE(install(store, "cards", 1));
+  ASSERT_TRUE(store.recordReview(0, 3, 10));
+  anki::UploadBatch batch;
+  ASSERT_TRUE(store.prepareUpload(batch));
+  ASSERT_TRUE(store.markUploadAttempted(batch.batchId));
+  EXPECT_FALSE(store.restartDeck(1));
+  ASSERT_TRUE(store.open());
+  EXPECT_FALSE(store.restartDeck(1));
+}
+
+TEST_F(StoreTest, VersionOneUpgradeKeepsPreparedPayloadAndAcknowledgements) {
+  anki::AnkiStore store;
+  ASSERT_TRUE(store.open());
+  ASSERT_TRUE(install(store, "old", 1));
+  ASSERT_TRUE(store.recordReview(0, 1, 123));
+  anki::UploadBatch original, batch;
+  ASSERT_TRUE(store.prepareUpload(original));
+  useVersionOneJournal();
+  const auto path = journal();
+  const auto previous = Storage.files[path];
+  ASSERT_TRUE(store.open());
+  ASSERT_TRUE(store.restartDeck(1));
+  EXPECT_EQ(Storage.files[path][4], 2);
+  EXPECT_EQ(Storage.files[path + ".damaged"], previous);
+  ASSERT_TRUE(store.recordReview(0, 4, 456));
+  ASSERT_TRUE(store.open());
+  ASSERT_TRUE(store.prepareUpload(batch));
+  EXPECT_STREQ(batch.batchId, original.batchId);
+  EXPECT_EQ(batch.count, original.count);
+  EXPECT_EQ(batch.reviews[0].ease, 1);
+  EXPECT_EQ(batch.reviews[0].durationMs, 123U);
+  ASSERT_TRUE(store.markUploadAttempted(batch.batchId));
+  ASSERT_TRUE(store.acknowledgeUpload(batch.batchId));
+  ASSERT_TRUE(store.open());
+  ASSERT_TRUE(store.prepareUpload(batch));
+  EXPECT_STRNE(batch.batchId, original.batchId);
+  EXPECT_EQ(batch.count, 1);
+  EXPECT_EQ(batch.reviews[0].sequence, 2U);
+  EXPECT_EQ(batch.reviews[0].ease, 4);
+  ASSERT_TRUE(store.markUploadAttempted(batch.batchId));
+  ASSERT_TRUE(store.acknowledgeUpload(batch.batchId));
+  ASSERT_TRUE(store.restartDeck(1));
+  ASSERT_TRUE(store.open());
+  EXPECT_EQ(store.pendingCount(), 0U);
+  anki::CardInfo card;
+  ASSERT_TRUE(store.nextUnreviewed(1, 0, card));
+  EXPECT_EQ(card.ordinal, 0);
+}
+
+TEST_F(StoreTest, EveryUpgradeAndRestartCheckpointPreservesEarlierRatingsAndBatchIdentity) {
+  anki::AnkiStore store;
+  ASSERT_TRUE(store.open());
+  ASSERT_TRUE(install(store, "old", 1));
+  ASSERT_TRUE(store.recordReview(0, 2, 123));
+  anki::UploadBatch original;
+  ASSERT_TRUE(store.prepareUpload(original));
+  useVersionOneJournal();
+  ASSERT_TRUE(store.open());
+  Storage.captureCheckpoints = true;
+  ASSERT_TRUE(store.restartDeck(1));
+  Storage.captureCheckpoints = false;
+  const auto checkpoints = std::move(Storage.checkpoints);
+  ASSERT_FALSE(checkpoints.empty());
+  for (size_t i = 0; i < checkpoints.size(); ++i) {
+    SCOPED_TRACE(i);
+    Storage.files = checkpoints[i];
+    Storage.handles.clear();
+    anki::AnkiStore restarted;
+    ASSERT_TRUE(restarted.open());
+    EXPECT_EQ(restarted.pendingCount(), 1U);
+    anki::UploadBatch batch;
+    ASSERT_TRUE(restarted.prepareUpload(batch));
+    EXPECT_STREQ(batch.batchId, original.batchId);
+    ASSERT_EQ(batch.count, 1);
+    EXPECT_EQ(batch.reviews[0].ease, 2);
+    EXPECT_EQ(batch.reviews[0].durationMs, 123U);
+    anki::Deck deck;
+    ASSERT_TRUE(restarted.readDeck(0, deck));
+    EXPECT_LE(deck.remaining, 1);
+    if (deck.remaining == 0) {
+      ASSERT_TRUE(restarted.restartDeck(1));
+    }
+    ASSERT_TRUE(restarted.recordReview(0, 4, 321));
+    ASSERT_TRUE(restarted.open());
+    EXPECT_EQ(restarted.pendingCount(), 2U);
+  }
+}
+
+TEST_F(StoreTest, RestartWriteFailuresDoNotChangeLiveProgress) {
+  for (int mode = 0; mode < 3; ++mode) {
+    SCOPED_TRACE(mode);
+    Storage = {};
+    anki::AnkiStore store;
+    ASSERT_TRUE(store.open());
+    ASSERT_TRUE(install(store, "cards", 1));
+    ASSERT_TRUE(store.recordReview(0, 3, 10));
+    if (mode == 0) Storage.failWrite = true;
+    if (mode == 1) Storage.failSync = true;
+    // Completed-deck scan is open, seek, read, close; append then opens/writes/syncs/closes.
+    if (mode == 2) Storage.failAfter = 7;
+    EXPECT_FALSE(store.restartDeck(1));
+    EXPECT_EQ(store.pendingCount(), 1U);
+    anki::CardInfo card;
+    EXPECT_FALSE(store.nextUnreviewed(1, 0, card));
+    ASSERT_TRUE(store.open());
+    EXPECT_EQ(store.pendingCount(), 1U);
+  }
+}
+
+TEST_F(StoreTest, TornRestartRetainsCompletedPassAndCorruptRestartBlocksRecovery) {
+  anki::AnkiStore store;
+  ASSERT_TRUE(store.open());
+  ASSERT_TRUE(install(store, "cards", 1));
+  ASSERT_TRUE(store.recordReview(0, 3, 10));
+  ASSERT_TRUE(store.restartDeck(1));
+  const auto path = journal();
+  Storage.files[path].resize(Storage.files[path].size() - 7);
+  ASSERT_TRUE(store.open());
+  EXPECT_EQ(store.pendingCount(), 1U);
+  anki::CardInfo card;
+  EXPECT_FALSE(store.nextUnreviewed(1, 0, card));
+  ASSERT_TRUE(store.restartDeck(1));
+  Storage.files[path].back() ^= 1;
+  EXPECT_FALSE(store.open());
+}
+
+TEST_F(StoreTest, RestartWithUnknownDeckOrOldVersionIsRejectedEvenWithValidChecksum) {
+  for (const bool oldVersion : {false, true}) {
+    Storage = {};
+    anki::AnkiStore store;
+    ASSERT_TRUE(store.open());
+    ASSERT_TRUE(install(store, "cards", 1));
+    ASSERT_TRUE(store.recordReview(0, 3, 10));
+    ASSERT_TRUE(store.restartDeck(1));
+    if (oldVersion) {
+      useVersionOneJournal();
+    } else {
+      auto& bytes = Storage.files[journal()];
+      bytes[bytes.size() - 64 + 48] = 99;
+      checksum(bytes, bytes.size() - 64, 60);
+    }
+    EXPECT_FALSE(store.open());
+  }
+}
+
+TEST_F(StoreTest, RepeatedReviewsUploadSequentiallyWithoutRescanningEarlierBatches) {
+  anki::AnkiStore store;
+  ASSERT_TRUE(store.open());
+  ASSERT_TRUE(install(store, "cards", 40));
+  for (int pass = 0; pass < 3; ++pass) {
+    if (pass) {
+      ASSERT_TRUE(store.restartDeck(1));
+      ASSERT_TRUE(store.restartDeck(2));
+    }
+    for (uint16_t i = 0; i < 40; ++i) ASSERT_TRUE(store.recordReview(i, pass + 1, 10));
+  }
+  ASSERT_TRUE(store.open());
+  Storage.bytesRead = 0;
+  uint32_t seen = 0;
+  anki::UploadBatch batch;
+  while (store.pendingCount()) {
+    ASSERT_TRUE(store.prepareUpload(batch));
+    for (uint8_t i = 0; i < batch.count; ++i, ++seen) {
+      EXPECT_EQ(batch.reviews[i].cardId, 100 + seen % 40);
+      EXPECT_EQ(batch.reviews[i].ease, seen / 40 + 1);
+    }
+    ASSERT_TRUE(store.markUploadAttempted(batch.batchId));
+    ASSERT_TRUE(store.acknowledgeUpload(batch.batchId));
+  }
+  EXPECT_EQ(seen, 120U);
+  EXPECT_LE(Storage.bytesRead, 124U * 64U);
+}
+
+TEST_F(StoreTest, PendingCountSurvivesMoreThanSixtyFiveThousandReviews) {
+  anki::AnkiStore store;
+  ASSERT_TRUE(store.open());
+  ASSERT_TRUE(install(store, "cards", 1));
+  for (uint32_t i = 0; i < 65536; ++i) {
+    if (i) {
+      ASSERT_TRUE(store.restartDeck(1));
+    }
+    ASSERT_TRUE(store.recordReview(0, 3, 10));
+  }
+  EXPECT_EQ(store.pendingCount(), 65536U);
+  ASSERT_TRUE(store.open());
+  EXPECT_EQ(store.pendingCount(), 65536U);
+  anki::UploadBatch batch;
+  ASSERT_TRUE(store.prepareUpload(batch));
+  EXPECT_EQ(batch.count, 32);
 }
 }  // namespace

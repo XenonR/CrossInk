@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 
 #include "AnkiStore.h"
 
@@ -21,7 +22,9 @@ constexpr size_t CARD_BYTES = 40;
 constexpr size_t DECK_BYTES = 256;
 constexpr size_t JOURNAL_HEADER_BYTES = 96;
 constexpr size_t EVENT_BYTES = 64;
-constexpr uint8_t RATING = 1, PREPARED = 2, ATTEMPTED = 3, ACKNOWLEDGED = 4, UNCERTAIN = 5, RESOLVED = 6;
+constexpr uint16_t JOURNAL_VERSION = 2;
+constexpr uint8_t RATING = 1, PREPARED = 2, ATTEMPTED = 3, ACKNOWLEDGED = 4, UNCERTAIN = 5, RESOLVED = 6,
+                  RESTART_DECK = 7;
 
 uint16_t get16(const uint8_t* p) { return static_cast<uint16_t>(p[0] | (p[1] << 8)); }
 uint32_t get32(const uint8_t* p) {
@@ -147,9 +150,12 @@ bool AnkiStore::open() {
   close();
   generation_[0] = 0;
   cardCount_ = deckCount_ = pendingCount_ = 0;
+  journalVersion_ = 0;
   preparedFirst_ = preparedCount_ = 0;
   nextSequence_ = 1;
   acknowledgedThrough_ = 0;
+  reviewReadOffset_ = JOURNAL_HEADER_BYTES;
+  reviewReadSequence_ = 1;
   attempted_ = attention_ = failed_ = false;
   reviewed_.fill(0);
   if (!Storage.exists(SNAPSHOT)) {
@@ -288,7 +294,7 @@ bool AnkiStore::commitSnapshot() {
   }
   uint8_t journal[JOURNAL_HEADER_BYTES] = {};
   memcpy(journal, "ANJ1", 4);
-  put16(journal + 4, 1);
+  put16(journal + 4, JOURNAL_VERSION);
   journal[6] = strlen(state.generation);
   memcpy(journal + 16, state.generation, strlen(state.generation));
   put32(journal + 92, crc32(journal, 92) ^ 0xffffffffU);
@@ -390,7 +396,64 @@ bool AnkiStore::nextUnreviewed(int64_t deckId, uint16_t start, CardInfo& out) {
   return false;
 }
 
-bool AnkiStore::appendEvent(uint8_t type, const Review* review) {
+bool AnkiStore::completedDeckMask(const int64_t deckId, ReviewedBits& mask) {
+  mask.fill(0);
+  if (deckId <= 0) return false;
+  auto file = Storage.open(SNAPSHOT, O_RDONLY);
+  uint8_t record[CARD_BYTES];
+  bool ok = file && file.seek(HEADER_BYTES);
+  bool found = false, complete = true;
+  for (uint16_t i = 0; ok && i < cardCount_; ++i) {
+    ok = exactRead(file, record, sizeof(record));
+    if (ok && static_cast<int64_t>(get64(record + 8)) == deckId) {
+      found = true;
+      const uint8_t bit = 1U << (i % 8);
+      mask[i / 8] |= bit;
+      if (!(reviewed_[i / 8] & bit)) complete = false;
+    }
+  }
+  if (file) ok = file.close() && ok;
+  if (!ok) {
+    LOG_ERR("ANKI", "Cannot read deck restart membership");
+    failed_ = true;
+  }
+  return ok && found && complete;
+}
+
+bool AnkiStore::upgradeJournal() {
+  if (journalVersion_ == JOURNAL_VERSION) return true;
+  char path[112];
+  journalPath(path, sizeof(path));
+  auto file = Storage.open(path, O_RDONLY);
+  const size_t bytes = file ? file.size() : 0;
+  const bool closed = file && file.close();
+  if (!closed || !repairJournal(bytes, true)) {
+    LOG_ERR("ANKI", "Cannot upgrade review journal; reopen before continuing");
+    failed_ = true;
+    return false;
+  }
+  journalVersion_ = JOURNAL_VERSION;
+  return true;
+}
+
+bool AnkiStore::restartDeck(const int64_t deckId) {
+  if (failed_ || attention_ || !hasSnapshot() || nextSequence_ == std::numeric_limits<uint32_t>::max()) {
+    LOG_ERR("ANKI", "Cannot restart deck in current storage/upload state");
+    return false;
+  }
+  // 125 bytes of bounded scratch: reuse the retained bitmap and clear only
+  // this deck after the restart event is durable, without another heap buffer.
+  ReviewedBits mask{};
+  if (!completedDeckMask(deckId, mask)) {
+    LOG_ERR("ANKI", "Cannot restart missing or unfinished deck");
+    return false;
+  }
+  if (!upgradeJournal() || !appendEvent(RESTART_DECK, nullptr, deckId)) return false;
+  for (size_t i = 0; i < reviewed_.size(); ++i) reviewed_[i] &= ~mask[i];
+  return true;
+}
+
+bool AnkiStore::appendEvent(uint8_t type, const Review* review, const int64_t deckId) {
   if (failed_ || !hasSnapshot()) return false;
   uint8_t bytes[EVENT_BYTES] = {};
   memcpy(bytes, "AEV1", 4);
@@ -405,10 +468,17 @@ bool AnkiStore::appendEvent(uint8_t type, const Review* review) {
   }
   put32(bytes + 40, preparedFirst_);
   bytes[44] = preparedCount_;
+  put64(bytes + 48, deckId);
   put32(bytes + 60, crc32(bytes, 60) ^ 0xffffffffU);
   char path[112];
   journalPath(path, sizeof(path));
   auto file = Storage.open(path, O_WRONLY | O_APPEND);
+  if (file && file.size() > std::numeric_limits<uint32_t>::max() - EVENT_BYTES) {
+    file.close();
+    LOG_ERR("ANKI", "Review journal exceeds supported file size");
+    failed_ = true;
+    return false;
+  }
   if (!file || !finishFile(file, file.write(bytes, sizeof(bytes)) == sizeof(bytes))) {
     LOG_ERR("ANKI", "Review journal write failed; reopen before further reviews");
     failed_ = true;  // A partial append must be recovered before another write.
@@ -417,9 +487,11 @@ bool AnkiStore::appendEvent(uint8_t type, const Review* review) {
   return true;
 }
 bool AnkiStore::recordReview(uint16_t ordinal, uint8_t ease, uint32_t durationMs, uint64_t answeredAtMs) {
-  if (failed_ || ordinal >= cardCount_ || ease < 1 || ease > 4 || answeredAtMs > 9999999999999ULL ||
-      (reviewed_[ordinal / 8] & (1U << (ordinal % 8))))
+  if (failed_ || attention_ || ordinal >= cardCount_ || ease < 1 || ease > 4 || answeredAtMs > 9999999999999ULL ||
+      nextSequence_ == std::numeric_limits<uint32_t>::max() || (reviewed_[ordinal / 8] & (1U << (ordinal % 8)))) {
+    LOG_ERR("ANKI", "Cannot record invalid, duplicate or blocked review");
     return false;
+  }
   CardInfo card;
   if (!readCard(ordinal, card)) return false;
   Review review{nextSequence_, ordinal, card.cardId, ease, std::min(durationMs, uint32_t(3600000)), answeredAtMs};
@@ -430,7 +502,7 @@ bool AnkiStore::recordReview(uint16_t ordinal, uint8_t ease, uint32_t durationMs
   return true;
 }
 
-bool AnkiStore::repairJournal(size_t validBytes) {
+bool AnkiStore::repairJournal(size_t validBytes, const bool upgrade) {
   // Recovery runs once on entry. Bounded paths plus one 256-byte copy block
   // avoid allocating a second journal-sized buffer on the worker stack.
   char path[112], temp[124], damaged[128];
@@ -457,9 +529,20 @@ bool AnkiStore::repairJournal(size_t validBytes) {
   auto destination = Storage.open(temp, O_WRONLY | O_CREAT | O_TRUNC);
   uint8_t buffer[256];
   bool ok = source && destination;
+  bool first = true;
   while (ok && validBytes) {
     const size_t n = std::min(validBytes, sizeof(buffer));
-    ok = exactRead(source, buffer, n) && destination.write(buffer, n) == n;
+    ok = exactRead(source, buffer, n);
+    if (ok && first && upgrade) {
+      if (n < JOURNAL_HEADER_BYTES) {
+        ok = false;
+      } else {
+        put16(buffer + 4, JOURNAL_VERSION);
+        put32(buffer + 92, crc32(buffer, 92) ^ 0xffffffffU);
+      }
+    }
+    first = false;
+    ok = ok && destination.write(buffer, n) == n;
     validBytes -= n;
   }
   if (source) ok = source.close() && ok;
@@ -469,7 +552,9 @@ bool AnkiStore::repairJournal(size_t validBytes) {
     Storage.rename(damaged, path);
     return false;
   }
-  LOG_INF("ANKI", "Recovered incomplete journal tail; preserved damaged original");
+  reviewReadOffset_ = JOURNAL_HEADER_BYTES;
+  reviewReadSequence_ = 1;
+  LOG_INF("ANKI", "%s review journal; preserved original", upgrade ? "Upgraded" : "Repaired");
   return true;
 }
 
@@ -483,9 +568,10 @@ bool AnkiStore::recoverJournal() {
   auto file = Storage.open(path, O_RDONLY);
   uint8_t header[JOURNAL_HEADER_BYTES];
   bool ok = file && exactRead(file, header, sizeof(header)) && memcmp(header, "ANJ1", 4) == 0 &&
-            get16(header + 4) == 1 && header[6] == strlen(generation_) &&
+            (get16(header + 4) == 1 || get16(header + 4) == JOURNAL_VERSION) && header[6] == strlen(generation_) &&
             memcmp(header + 16, generation_, strlen(generation_)) == 0 &&
             get32(header + 92) == (crc32(header, 92) ^ 0xffffffffU);
+  if (ok) journalVersion_ = get16(header + 4);
   size_t validBytes = JOURNAL_HEADER_BYTES;
   bool torn = false;
   uint8_t bytes[EVENT_BYTES];
@@ -509,8 +595,9 @@ bool AnkiStore::recoverJournal() {
     if (type == RATING) {
       Review review;
       decodeReview(bytes, review);
-      if (review.sequence != nextSequence_ || review.ordinal >= cardCount_ || review.ease < 1 || review.ease > 4 ||
-          review.durationMs > 3600000 || review.answeredAtMs > 9999999999999ULL || review.cardId <= 0 ||
+      if (nextSequence_ == std::numeric_limits<uint32_t>::max() || review.sequence != nextSequence_ ||
+          review.ordinal >= cardCount_ || review.ease < 1 || review.ease > 4 || review.durationMs > 3600000 ||
+          review.answeredAtMs > 9999999999999ULL || review.cardId <= 0 ||
           (reviewed_[review.ordinal / 8] & (1U << (review.ordinal % 8)))) {
         ok = false;
         break;
@@ -519,7 +606,8 @@ bool AnkiStore::recoverJournal() {
       ++nextSequence_;
     } else if (type == PREPARED) {
       if (preparedCount_ || get32(bytes + 40) != acknowledgedThrough_ + 1 || bytes[44] == 0 ||
-          bytes[44] > MAX_UPLOAD_REVIEWS || get32(bytes + 40) + bytes[44] > nextSequence_) {
+          bytes[44] > MAX_UPLOAD_REVIEWS || get32(bytes + 40) > nextSequence_ ||
+          bytes[44] > nextSequence_ - get32(bytes + 40)) {
         ok = false;
         break;
       }
@@ -541,6 +629,13 @@ bool AnkiStore::recoverJournal() {
         preparedFirst_ = preparedCount_ = 0;
         attempted_ = attention_ = false;
       }
+    } else if (type == RESTART_DECK && journalVersion_ == JOURNAL_VERSION && !attention_) {
+      ReviewedBits mask{};
+      if (!completedDeckMask(static_cast<int64_t>(get64(bytes + 48)), mask)) {
+        ok = false;
+        break;
+      }
+      for (size_t i = 0; i < reviewed_.size(); ++i) reviewed_[i] &= ~mask[i];
     } else {
       ok = false;
       break;
@@ -561,14 +656,20 @@ bool AnkiStore::readReview(uint32_t sequence, Review& out) {
   char path[112];
   journalPath(path, sizeof(path));
   auto file = Storage.open(path, O_RDONLY);
+  if (sequence < reviewReadSequence_) {
+    reviewReadOffset_ = JOURNAL_HEADER_BYTES;
+    reviewReadSequence_ = 1;
+  }
   bool found = false;
-  bool ok = file && file.seek(JOURNAL_HEADER_BYTES);
+  bool ok = file && file.seek(reviewReadOffset_);
+  uint32_t nextOffset = reviewReadOffset_;
   uint8_t bytes[EVENT_BYTES];
   while (ok && file.position() < file.size()) {
     ok = exactRead(file, bytes, sizeof(bytes));
     ok = ok && memcmp(bytes, "AEV1", 4) == 0 && get32(bytes + 60) == (crc32(bytes, 60) ^ 0xffffffffU);
     if (ok && bytes[4] == RATING && get32(bytes + 8) == sequence) {
       decodeReview(bytes, out);
+      nextOffset = file.position();
       found = true;
       break;
     }
@@ -577,6 +678,9 @@ bool AnkiStore::readReview(uint32_t sequence, Review& out) {
   if (!ok || !found) {
     LOG_ERR("ANKI", "Cannot read pending review");
     failed_ = true;
+  } else {
+    reviewReadOffset_ = nextOffset;
+    reviewReadSequence_ = sequence + 1;
   }
   return ok && found;
 }
@@ -584,7 +688,7 @@ bool AnkiStore::prepareUpload(UploadBatch& out) {
   if (failed_ || attention_ || !pendingCount_) return false;
   if (!preparedCount_) {
     preparedFirst_ = acknowledgedThrough_ + 1;
-    preparedCount_ = std::min<uint16_t>(pendingCount_, MAX_UPLOAD_REVIEWS);
+    preparedCount_ = std::min<uint32_t>(pendingCount_, MAX_UPLOAD_REVIEWS);
     if (!appendEvent(PREPARED)) return false;
   }
   out = {};
