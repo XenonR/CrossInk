@@ -5,16 +5,15 @@
 - Review downloaded Anki text cards offline on X4 Pro, with paged questions and answers, basic bold text, touch and physical controls, and SD-persisted ratings.
 - Manually synchronize due-card batches and reviews with the existing Xteink-Anki desktop add-on (protocols 2 and 3). Downloads preserve the previous batch on failure; uncertain review uploads remain on SD with a recovery report for checking in Anki Desktop.
 - Repeat completed Anki decks offline from the deck list or completion screen. Repeat progress survives restarts, and every pass's ratings are included in the next sync.
-- Show the downloaded card count beneath each Anki deck name.
 
 ### Changed
 
+- Remove redundant Anki card-count subtitles; deck totals remain in the existing progress counter.
 - Remove on-screen Anki page buttons to give cards more reading space; long questions and answers still page with swipes or physical buttons.
 
 ### Fixed
 
 - Restore X4 Pro firmware and simulator builds after the Anki deck-label update.
-- Show a single Anki deck subtitle: "N cards", or "Repeat N cards" when repeating is available.
 - Wrap Anki completion, error, empty-library, and sync messages within the screen, keeping nearby controls clear at both UI sizes.
 
 ## [v1.6.1] - 2026-10-03

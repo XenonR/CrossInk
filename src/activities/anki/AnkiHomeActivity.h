@@ -28,7 +28,6 @@ class AnkiHomeActivity final : public Activity {
   // The SDK consumes each provider label before requesting the next row.
   anki::Deck rowDeck;
   char rowValue[24] = {};
-  char rowSubtitle[128] = {};
   freeink::ui::GfxRendererTarget uiTarget;
   UiApp app;
   ButtonNavigator navigator;
