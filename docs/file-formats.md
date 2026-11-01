@@ -1,6 +1,6 @@
 # File Formats
 
-## `/.crossink-anki/` (snapshot version 1, journal versions 1–2)
+## `/.crossink-anki/` (snapshot version 1, journal versions 1–3)
 
 This directory is persistent application data, separate from disposable reader
 caches. Integers are explicitly encoded little-endian; structures are never
@@ -21,7 +21,7 @@ silently reverting a generation that could own unsent reviews. Old journals are
 retained, including the journal matching the backup snapshot.
 
 `reviews-<generation-hash>.log` starts with a 96-byte `ANJ1` header containing
-version (currently 2), full generation and CRC32. The filename uses the generation's FNV-1a
+version (currently 3), full generation and CRC32. The filename uses the generation's FNV-1a
 64-bit hash; the full header generation must match, so collisions fail closed.
 Each following 64-byte `AEV1` record has a type, review sequence/ordinal, rating,
 duration, card ID, optional UTC milliseconds, prepared batch range and CRC32.
@@ -34,21 +34,44 @@ ID at bytes 48–55. Its CRC remains at bytes 60–63; record and header sizes a
 unchanged. A restart requires an existing, nonempty, completed deck and no
 unresolved upload. It clears only that deck's reviewed bits. Later rating events
 reuse card ordinals with new, monotonically increasing review sequences, so every
-pass is uploaded in order. Ratings within a pass cannot be duplicated. Pending
-review counts are 32-bit; sequence/file-size overflow is rejected.
+pass is uploaded in order. Legacy rating events (type 1) complete a card for
+every ease value and cannot be duplicated within a pass. Pending review counts
+are 32-bit; sequence/file-size overflow is rejected.
 
-Version 1 journals remain readable and support ordinary ratings/uploads. Before
-their first restart, the valid journal is copied to a synced `.tmp` with a version
-2 header and recalculated header CRC. The original is renamed to `.damaged`
+Version 3 adds learning-rating event type 8 with the same field offsets and
+64-byte record size as legacy type 1. Again (ease 1) and Hard (ease 2) keep the
+card incomplete; Good (ease 3) and Easy (ease 4) complete it. Repeated ratings of
+an incomplete card get new monotonically increasing review sequences. Every
+rating is uploaded chronologically, including retries across batch boundaries.
+Type 1 keeps its historical completion meaning even in a version 3 journal;
+type 7 deck restarts remain supported.
+
+The learning queue is reconstructed, not serialized separately. A sequential
+snapshot scan identifies deck membership; chronological journal replay counts
+successfully saved answers within the selected deck, including answers to cards
+completed later. Again becomes eligible after two intervening answers and Hard
+after five. Ready repeats alternate with untouched cards; earliest eligibility
+wins across both ratings, with original card order breaking ties. When nothing
+else is available, the earliest waiting repeat appears immediately. Deck restart
+resets that deck's queue and completion bits without deleting rating history.
+Reading, paging and repeated next-card queries do not alter the queue.
+
+Version 1 and 2 journals remain readable, including version 2 restart events.
+Before writing new learning events, a valid older journal is copied to a synced
+`.tmp` with a version 3 header and recalculated header CRC. Existing event bytes
+are preserved. The original is renamed to `.damaged`
 (preserving an existing original under a numbered suffix), then the temporary
 file is activated. If power interrupts the rename window, normal journal recovery
 restores the original. Review sequences, payloads and batch IDs do not change.
-Older firmware rejects version 2; retain the data when downgrading.
+Older firmware rejects unsupported journal versions; retain the data when
+downgrading. The snapshot format remains version 1.
 
 A rating becomes visible as accepted only after checked write/sync/close.
 Attempt state is persisted before HTTP I/O; replay pauses any attempt lacking a
-durable acknowledgment or manual resolution. Acknowledged reviews remain
-reviewed until an explicit deck restart. A missing journal or corruption inside it blocks
+durable acknowledgment or manual resolution. Acknowledgment does not complete a
+retry card or change its eligibility. Completed cards remain complete until a
+deck restart or successful snapshot replacement. Failed downloads preserve the
+installed queue and progress. A missing journal or corruption inside it blocks
 review. Incomplete final bytes can be repaired through a synced temporary prefix
 and preserved damaged original. Fully sized checksum-invalid records are retained
 for recovery rather than silently dropped.

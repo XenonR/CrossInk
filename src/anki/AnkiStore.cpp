@@ -23,9 +23,11 @@ constexpr size_t CARD_BYTES = 40;
 constexpr size_t DECK_BYTES = 256;
 constexpr size_t JOURNAL_HEADER_BYTES = 96;
 constexpr size_t EVENT_BYTES = 64;
-constexpr uint16_t JOURNAL_VERSION = 2;
+constexpr uint16_t JOURNAL_VERSION = 3;
 constexpr uint8_t RATING = 1, PREPARED = 2, ATTEMPTED = 3, ACKNOWLEDGED = 4, UNCERTAIN = 5, RESOLVED = 6,
-                  RESTART_DECK = 7;
+                  RESTART_DECK = 7, LEARNING_RATING = 8;
+constexpr uint32_t OTHER_DECK = std::numeric_limits<uint32_t>::max();
+constexpr uint32_t AGAIN_GAP = 2, HARD_GAP = 5;
 
 uint16_t get16(const uint8_t* p) { return static_cast<uint16_t>(p[0] | (p[1] << 8)); }
 uint32_t get32(const uint8_t* p) {
@@ -109,7 +111,13 @@ struct AnkiStore::ImportState {
 
 AnkiStore::AnkiStore() = default;
 AnkiStore::~AnkiStore() { close(); }
-void AnkiStore::close() { cancelSnapshot(); }
+void AnkiStore::close() {
+  cancelSnapshot();
+  reviewSchedule_.reset();
+  reviewDeckId_ = 0;
+  reviewTurn_ = 0;
+  lastWasRetry_ = false;
+}
 
 void AnkiStore::journalPath(char* out, size_t capacity) const {
   snprintf(out, capacity, "%s/reviews-%016llx.log", ROOT, static_cast<unsigned long long>(generationHash(generation_)));
@@ -443,6 +451,115 @@ bool AnkiStore::nextUnreviewed(int64_t deckId, uint16_t start, CardInfo& out) {
   return ok && found;
 }
 
+void AnkiStore::resetReviewSchedule() {
+  if (!reviewSchedule_) return;
+  for (uint16_t i = 0; i < cardCount_; ++i) {
+    if (reviewSchedule_[i] != OTHER_DECK) reviewSchedule_[i] = 0;
+  }
+  reviewTurn_ = 0;
+  lastWasRetry_ = false;
+}
+
+void AnkiStore::applyReviewSchedule(const uint16_t ordinal, const uint8_t ease, const bool learning) {
+  if (!reviewSchedule_ || reviewSchedule_[ordinal] == OTHER_DECK) return;
+  lastWasRetry_ = reviewSchedule_[ordinal] != 0;
+  ++reviewTurn_;
+  reviewSchedule_[ordinal] = learning && ease <= 2 ? reviewTurn_ + (ease == 1 ? AGAIN_GAP : HARD_GAP) : 0;
+}
+
+bool AnkiStore::beginReview(const int64_t deckId) {
+  reviewDeckId_ = 0;
+  reviewTurn_ = 0;
+  lastWasRetry_ = false;
+  reviewSchedule_.reset();
+  if (failed_ || attention_ || !hasSnapshot() || !cardCount_ || deckId <= 0) {
+    LOG_ERR("ANKI", "Cannot initialize review queue in current state");
+    return false;
+  }
+  // At most 4,000 bytes, allocated once per review rather than on the small
+  // task stack or in every home/sync store. Reused without per-answer allocation.
+  reviewSchedule_ = makeUniqueNoThrow<uint32_t[]>(cardCount_);
+  if (!reviewSchedule_) {
+    LOG_ERR("ANKI", "Cannot allocate %u-byte review schedule", static_cast<unsigned>(cardCount_ * sizeof(uint32_t)));
+    return false;
+  }
+  auto snapshot = Storage.open(SNAPSHOT, O_RDONLY);
+  // One 96-byte scratch buffer serves both indexes and journal records/header.
+  uint8_t record[JOURNAL_HEADER_BYTES];
+  bool ok = snapshot && snapshot.seek(HEADER_BYTES), found = false;
+  for (uint16_t i = 0; ok && i < cardCount_; ++i) {
+    ok = exactRead(snapshot, record, CARD_BYTES);
+    if (!ok) break;
+    const int64_t candidateDeck = static_cast<int64_t>(get64(record + 8));
+    ok = static_cast<int64_t>(get64(record)) > 0 && candidateDeck > 0;
+    reviewSchedule_[i] = candidateDeck == deckId ? 0 : OTHER_DECK;
+    found = found || candidateDeck == deckId;
+  }
+  if (snapshot) ok = snapshot.close() && ok;
+  if (ok && found) {
+    char path[112];
+    journalPath(path, sizeof(path));
+    auto journal = Storage.open(path, O_RDONLY);
+    ok = journal && exactRead(journal, record, sizeof(record)) && memcmp(record, "ANJ1", 4) == 0 &&
+         get16(record + 4) == journalVersion_ && record[6] == strlen(generation_) &&
+         memcmp(record + 16, generation_, strlen(generation_)) == 0 &&
+         get32(record + 92) == (crc32(record, 92) ^ 0xffffffffU);
+    uint32_t sequence = 1;
+    while (ok && journal.position() < journal.size()) {
+      ok = exactRead(journal, record, EVENT_BYTES) && memcmp(record, "AEV1", 4) == 0 &&
+           get32(record + 60) == (crc32(record, 60) ^ 0xffffffffU);
+      if (!ok) break;
+      const uint8_t type = record[4];
+      if (type == RATING || (type == LEARNING_RATING && journalVersion_ >= 3)) {
+        const uint16_t ordinal = get16(record + 12);
+        ok = get32(record + 8) == sequence++ && ordinal < cardCount_ && record[14] >= 1 && record[14] <= 4 &&
+             reviewTurn_ < OTHER_DECK - HARD_GAP - 1;
+        if (ok) {
+          // Replay all ratings, even of now-completed cards: their answers
+          // advanced this deck's spacing and alternation at the time.
+          applyReviewSchedule(ordinal, record[14], type == LEARNING_RATING);
+        }
+      } else if (type == RESTART_DECK && journalVersion_ >= 2) {
+        if (static_cast<int64_t>(get64(record + 48)) == deckId) resetReviewSchedule();
+      } else if (type < PREPARED || type > RESOLVED) {
+        ok = false;
+      }
+    }
+    ok = ok && sequence == nextSequence_;
+    if (journal) ok = journal.close() && ok;
+  }
+  if (!ok || !found) {
+    LOG_ERR("ANKI", "Cannot restore review queue for deck %lld", static_cast<long long>(deckId));
+    reviewSchedule_.reset();
+    failed_ = true;
+    return false;
+  }
+  reviewDeckId_ = deckId;
+  return true;
+}
+
+bool AnkiStore::nextReviewCard(CardInfo& out) {
+  if (failed_ || attention_ || !reviewSchedule_) {
+    LOG_ERR("ANKI", "Review queue is unavailable");
+    failed_ = true;
+    return false;
+  }
+  uint16_t unseen = cardCount_, retry = cardCount_;
+  for (uint16_t i = 0; i < cardCount_; ++i) {
+    if (reviewSchedule_[i] == OTHER_DECK || (reviewed_[i / 8] & (1U << (i % 8)))) continue;
+    if (reviewSchedule_[i] == 0) {
+      if (unseen == cardCount_) unseen = i;
+    } else if (retry == cardCount_ || reviewSchedule_[i] < reviewSchedule_[retry]) {
+      retry = i;
+    }
+  }
+  // Once ready, retries alternate with untouched cards. Earliest due wins
+  // across both ratings; a small deck never waits for an artificial gap.
+  const bool retryReady = retry < cardCount_ && reviewSchedule_[retry] <= reviewTurn_;
+  const uint16_t selected = unseen == cardCount_ || (retryReady && !lastWasRetry_) ? retry : unseen;
+  return selected < cardCount_ && readCard(selected, out);
+}
+
 bool AnkiStore::completedDeckMask(const int64_t deckId, ReviewedBits& mask) {
   mask.fill(0);
   if (deckId <= 0) return false;
@@ -497,6 +614,7 @@ bool AnkiStore::restartDeck(const int64_t deckId) {
   }
   if (!upgradeJournal() || !appendEvent(RESTART_DECK, nullptr, deckId)) return false;
   for (size_t i = 0; i < reviewed_.size(); ++i) reviewed_[i] &= ~mask[i];
+  if (reviewDeckId_ == deckId) resetReviewSchedule();
   return true;
 }
 
@@ -535,15 +653,17 @@ bool AnkiStore::appendEvent(uint8_t type, const Review* review, const int64_t de
 }
 bool AnkiStore::recordReview(uint16_t ordinal, uint8_t ease, uint32_t durationMs, uint64_t answeredAtMs) {
   if (failed_ || attention_ || ordinal >= cardCount_ || ease < 1 || ease > 4 || answeredAtMs > 9999999999999ULL ||
-      nextSequence_ == std::numeric_limits<uint32_t>::max() || (reviewed_[ordinal / 8] & (1U << (ordinal % 8)))) {
+      nextSequence_ == std::numeric_limits<uint32_t>::max() || (reviewed_[ordinal / 8] & (1U << (ordinal % 8))) ||
+      (reviewSchedule_ && reviewTurn_ >= OTHER_DECK - HARD_GAP - 1)) {
     LOG_ERR("ANKI", "Cannot record invalid, duplicate or blocked review");
     return false;
   }
   CardInfo card;
   if (!readCard(ordinal, card)) return false;
   Review review{nextSequence_, ordinal, card.cardId, ease, std::min(durationMs, uint32_t(3600000)), answeredAtMs};
-  if (!appendEvent(RATING, &review)) return false;
-  reviewed_[ordinal / 8] |= 1U << (ordinal % 8);
+  if (!upgradeJournal() || !appendEvent(LEARNING_RATING, &review)) return false;
+  if (ease >= 3) reviewed_[ordinal / 8] |= 1U << (ordinal % 8);
+  applyReviewSchedule(ordinal, ease, true);
   ++nextSequence_;
   ++pendingCount_;
   return true;
@@ -615,7 +735,7 @@ bool AnkiStore::recoverJournal() {
   auto file = Storage.open(path, O_RDONLY);
   uint8_t header[JOURNAL_HEADER_BYTES];
   bool ok = file && exactRead(file, header, sizeof(header)) && memcmp(header, "ANJ1", 4) == 0 &&
-            (get16(header + 4) == 1 || get16(header + 4) == JOURNAL_VERSION) && header[6] == strlen(generation_) &&
+            get16(header + 4) >= 1 && get16(header + 4) <= JOURNAL_VERSION && header[6] == strlen(generation_) &&
             memcmp(header + 16, generation_, strlen(generation_)) == 0 &&
             get32(header + 92) == (crc32(header, 92) ^ 0xffffffffU);
   if (ok) journalVersion_ = get16(header + 4);
@@ -639,7 +759,7 @@ bool AnkiStore::recoverJournal() {
       break;
     }
     const uint8_t type = bytes[4];
-    if (type == RATING) {
+    if (type == RATING || (type == LEARNING_RATING && journalVersion_ >= 3)) {
       Review review;
       decodeReview(bytes, review);
       if (nextSequence_ == std::numeric_limits<uint32_t>::max() || review.sequence != nextSequence_ ||
@@ -649,7 +769,7 @@ bool AnkiStore::recoverJournal() {
         ok = false;
         break;
       }
-      reviewed_[review.ordinal / 8] |= 1U << (review.ordinal % 8);
+      if (type == RATING || review.ease >= 3) reviewed_[review.ordinal / 8] |= 1U << (review.ordinal % 8);
       ++nextSequence_;
     } else if (type == PREPARED) {
       if (preparedCount_ || get32(bytes + 40) != acknowledgedThrough_ + 1 || bytes[44] == 0 ||
@@ -676,7 +796,7 @@ bool AnkiStore::recoverJournal() {
         preparedFirst_ = preparedCount_ = 0;
         attempted_ = attention_ = false;
       }
-    } else if (type == RESTART_DECK && journalVersion_ == JOURNAL_VERSION && !attention_) {
+    } else if (type == RESTART_DECK && journalVersion_ >= 2 && !attention_) {
       ReviewedBits mask{};
       if (!completedDeckMask(static_cast<int64_t>(get64(bytes + 48)), mask)) {
         ok = false;
@@ -714,7 +834,7 @@ bool AnkiStore::readReview(uint32_t sequence, Review& out) {
   while (ok && file.position() < file.size()) {
     ok = exactRead(file, bytes, sizeof(bytes));
     ok = ok && memcmp(bytes, "AEV1", 4) == 0 && get32(bytes + 60) == (crc32(bytes, 60) ^ 0xffffffffU);
-    if (ok && bytes[4] == RATING && get32(bytes + 8) == sequence) {
+    if (ok && (bytes[4] == RATING || bytes[4] == LEARNING_RATING) && get32(bytes + 8) == sequence) {
       decodeReview(bytes, out);
       nextOffset = file.position();
       found = true;

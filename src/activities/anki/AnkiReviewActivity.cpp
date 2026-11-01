@@ -43,11 +43,11 @@ void AnkiReviewActivity::onEnter() {
   if (!side) {
     LOG_ERR("ANKI", "Cannot allocate %u-byte card-side buffer", static_cast<unsigned>(anki::MAX_SIDE_BYTES + 1));
     storageError = true;
-  } else if (!store.open() || store.needsAttention()) {
+  } else if (!store.open() || store.needsAttention() || !store.beginReview(deckId)) {
     LOG_ERR("ANKI", "Cannot start review from the SD snapshot");
     storageError = true;
   } else {
-    loadNextCard(0);
+    loadNextCard();
   }
   applySharedUiTheme(app, uiTarget);
   app.on(kAction, onAction, this);
@@ -61,7 +61,7 @@ void AnkiReviewActivity::onExit() {
   Activity::onExit();
 }
 
-void AnkiReviewActivity::loadNextCard(const uint16_t start) {
+void AnkiReviewActivity::loadNextCard() {
   uiReady = false;
   done = false;
   answer = false;
@@ -69,10 +69,10 @@ void AnkiReviewActivity::loadNextCard(const uint16_t start) {
   focusedAction = kReveal;
   // A Confirm held during a touch rating owns its release on the next screen.
   ignoreConfirmRelease = mappedInput.isPressed(MappedInputManager::Button::Confirm);
-  if (!store.nextUnreviewed(deckId, start, card)) {
+  if (!store.nextReviewCard(card)) {
     storageError = store.failed();
     done = !storageError;
-    if (storageError) LOG_ERR("ANKI", "Cannot locate next unreviewed card");
+    if (storageError) LOG_ERR("ANKI", "Cannot locate next review card");
     return;
   }
   cardStartedMs = millis();
@@ -164,7 +164,7 @@ void AnkiReviewActivity::activateAction(const int action) {
       LOG_ERR("ANKI", "Cannot persist deck restart");
       saveError = true;
     } else {
-      loadNextCard(0);
+      loadNextCard();
     }
     requestUpdate();
   } else if (action == kReveal) {
@@ -181,7 +181,7 @@ void AnkiReviewActivity::activateAction(const int action) {
       LOG_ERR("ANKI", "Cannot persist rating for card %u", card.ordinal);
       saveError = true;
     } else {
-      loadNextCard(card.ordinal + 1);
+      loadNextCard();
     }
     requestUpdate();
   }

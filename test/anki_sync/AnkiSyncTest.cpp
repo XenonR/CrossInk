@@ -161,7 +161,7 @@ TEST_F(SyncTest, RepeatedPassesReachDesktopInOrderAcrossBatchBoundaries) {
     if (pass) {
       ASSERT_TRUE(store.restartDeck(1));
     }
-    for (uint16_t i = 0; i < 20; ++i) ASSERT_TRUE(store.recordReview(i, pass + 2, 100 + i));
+    for (uint16_t i = 0; i < 20; ++i) ASSERT_TRUE(store.recordReview(i, pass + 3, 100 + i));
   }
   ASSERT_TRUE(store.open());
   replies = {{"/health", HEALTH},

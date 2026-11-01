@@ -15,6 +15,7 @@
 
 ### Fixed
 
+- Make Anki Again and Hard repeat cards during offline review instead of completing them. Repeats target two and five intervening saved answers, survive restarts, and sync every rating to Anki Desktop; Good and Easy complete the cards.
 - Prevent rapid or held Anki button presses from acting on an unseen answer or next card.
 - Reject malformed Anki responses and connection files, discard failed card imports, and allow interrupted snapshot activation to retry safely while retaining review evidence.
 - Require same-collection confirmation when changing the Anki connection while downloaded cards remain, even before any ratings have been saved.

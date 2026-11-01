@@ -2906,23 +2906,25 @@ class AnkiSimulatorSmokeTest {
           UITheme::getInstance().reload();
         }
         if (std::strcmp(std::getenv("CROSSINK_SIMULATOR_ANKI_SMOKE"), "restart") == 0) {
-          checkPending(4, 1);
+          checkPending(5, 3);
           anki::AnkiStore store;
           anki::UploadBatch batch;
-          if (!store.open() || !store.prepareUpload(batch) || batch.count != 4) fail("Restart lost ratings");
-          for (uint8_t i = 0; i < 4; ++i)
-            if (batch.reviews[i].cardId != 7000 + i || batch.reviews[i].ease != i + 1)
+          constexpr uint16_t ordinals[] = {0, 1, 2, 0, 3};
+          constexpr uint8_t ratings[] = {1, 2, 3, 1, 4};
+          if (!store.open() || !store.prepareUpload(batch) || batch.count != 5) fail("Restart lost ratings");
+          for (uint8_t i = 0; i < 5; ++i)
+            if (batch.reviews[i].cardId != 7000 + ordinals[i] || batch.reviews[i].ease != ratings[i])
               fail("Restart changed rating identity or ease");
           restart = true;
           activityManager.goToAnki();
           advance(Step::SelectDeckFirst);
         } else if (std::strcmp(std::getenv("CROSSINK_SIMULATOR_ANKI_SMOKE"), "repeat") == 0) {
-          checkPending(6, 4);
+          checkPending(9, 5);
           resumeRepeat = true;
           activityManager.goToAnki();
           advance(Step::SelectDeckFirst);
         } else if (std::strcmp(std::getenv("CROSSINK_SIMULATOR_ANKI_SMOKE"), "sync") == 0) {
-          checkPending(10, 5);
+          checkPending(16, 5);
           const char* url = std::getenv("CROSSINK_SIMULATOR_ANKI_SERVER");
           if (!url || !anki::AnkiConnectionStore::save({url, "anki-smoke-token"}))
             fail("Cannot save test connection through the credential store");
@@ -3090,7 +3092,7 @@ class AnkiSimulatorSmokeTest {
       case Step::CardOne:
         checkLayout(true);
         checkCard(1);
-        checkPending(1, 4);
+        checkPending(1, 5);
         tapAction(2, Step::HardAnswer);
         break;
       case Step::HardAnswer:
@@ -3100,7 +3102,7 @@ class AnkiSimulatorSmokeTest {
         break;
       case Step::CardTwo:
         checkCard(2);
-        checkPending(2, 3);
+        checkPending(2, 5);
         button(MappedInputManager::Button::Confirm, Step::CardTwoReleaseConsumed);
         break;
       case Step::CardTwoReleaseConsumed:
@@ -3108,11 +3110,19 @@ class AnkiSimulatorSmokeTest {
         button(MappedInputManager::Button::Confirm, Step::GoodAnswer);
         break;
       case Step::GoodAnswer:
-        tapAction(5, Step::CardThree);
+        tapAction(5, Step::RetryAgain);
+        break;
+      case Step::RetryAgain:
+        checkCard(0);
+        checkPending(3, 4);
+        tapAction(2, Step::RetryAgainAnswer);
+        break;
+      case Step::RetryAgainAnswer:
+        tapAction(3, Step::CardThree);
         break;
       case Step::CardThree:
         checkCard(3);
-        checkPending(3, 2);
+        checkPending(4, 4);
         tapAction(2, Step::EasyAnswer);
         break;
       case Step::EasyAnswer:
@@ -3120,7 +3130,7 @@ class AnkiSimulatorSmokeTest {
         break;
       case Step::CardFour:
         checkCard(4);
-        checkPending(4, 1);
+        checkPending(5, 3);
         button(MappedInputManager::Button::Confirm, Step::BlockJournal);
         break;
       case Step::BlockJournal:
@@ -3145,17 +3155,17 @@ class AnkiSimulatorSmokeTest {
         break;
       case Step::AfterFailure:
         requireActivity("AnkiHome");
-        checkPending(4, 1);
+        checkPending(5, 3);
         activityManager.goToReader(bookPath(), true);
         advance(Step::ReaderReturned, 8);
         break;
       case Step::ReaderReturned:
         requireActivity("EpubReader");
-        LOG_INF("ANKI-SMOKE", "Anki simulator smoke passed: themes, paging, bold, ratings, SD failure and EPUB");
+        LOG_INF("ANKI-SMOKE", "Anki simulator smoke passed: themes, paging, retry spacing, SD failure and EPUB");
         std::_Exit(0);
       case Step::RestartReview:
         checkCard(4);
-        checkPending(4, 1);
+        checkPending(5, 3);
         swipe(renderer.getScreenWidth() / 2, 8, renderer.getScreenWidth() / 2, renderer.getScreenHeight() / 4,
               Step::FrontlightOpened);
         break;
@@ -3172,48 +3182,66 @@ class AnkiSimulatorSmokeTest {
         break;
       case Step::RestartRating:
         if (!review().simulatorState().selectingRating) fail("Restart rating selector missing");
-        button(MappedInputManager::Button::Confirm, Step::Completed);
+        button(MappedInputManager::Button::Confirm, Step::RestartRetryAgain);
+        break;
+      case Step::RestartRetryAgain:
+        checkCard(0);
+        checkPending(6, 2);
+        tapAction(2, Step::RestartRetryAgainAnswer);
+        break;
+      case Step::RestartRetryAgainAnswer:
+        tapAction(5, Step::RestartRetryHard);
+        break;
+      case Step::RestartRetryHard:
+        checkCard(1);
+        checkPending(7, 1);
+        button(MappedInputManager::Button::Confirm, Step::RestartRetryHardAnswer);
+        break;
+      case Step::RestartRetryHardAnswer:
+        tapAction(5, Step::Completed);
         break;
       case Step::Completed:
         if (!review().simulatorState().done) fail("Completed batch did not show completion");
         captureOrientations("completion");
-        checkPending(5, 0);
+        checkPending(8, 0);
         burstConfirm();
         advance(Step::RepeatStarted);
         break;
       case Step::RepeatStarted:
         checkCard(0);
-        checkPending(5, 5);
+        checkPending(8, 5);
         tapAction(2, Step::RepeatFirstAnswer);
         break;
       case Step::RepeatFirstAnswer:
-        tapAction(6, Step::RepeatPartial);
+        tapAction(3, Step::RepeatPartial);
         break;
       case Step::RepeatPartial:
         checkCard(1);
-        checkPending(6, 4);
+        checkPending(9, 5);
         button(MappedInputManager::Button::Back, Step::RestartDone);
         break;
       case Step::RestartDone:
         requireActivity("AnkiHome");
-        checkPending(6, 4);
+        checkPending(9, 5);
         LOG_INF("ANKI-SMOKE",
-                "Anki simulator restart passed: persisted ratings, frontlight, completion and physical repeat");
+                "Anki simulator restart passed: persisted retries, frontlight, completion and physical repeat");
         std::_Exit(0);
       case Step::RepeatResumeReview:
         checkCard(1);
-        checkPending(6, 4);
-        repeatOrdinal = 1;
+        checkPending(9, 5);
+        repeatIndex = 0;
         tapAction(2, Step::RepeatAnswer);
         break;
       case Step::RepeatAnswer:
-        if (repeatOrdinal == 4) mappedInputManager.simulatorInjectPress(MappedInputManager::Button::Confirm);
-        tapAction(6, Step::RepeatNext);
+        if (repeatIndex == 6) mappedInputManager.simulatorInjectPress(MappedInputManager::Button::Confirm);
+        tapAction(kRepeatActions[repeatIndex], Step::RepeatNext);
         break;
       case Step::RepeatNext:
-        if (++repeatOrdinal < 5) {
-          checkCard(repeatOrdinal);
-          checkPending(5 + repeatOrdinal, 5 - repeatOrdinal);
+        if (++repeatIndex < 7) {
+          // After retrying card 0, unseen card 3 must interrupt the ready
+          // retries before card 1. This catches bucket-draining regressions.
+          checkCard(kRepeatOrdinals[repeatIndex]);
+          checkPending(9 + repeatIndex, kRepeatRemaining[repeatIndex]);
           tapAction(2, Step::RepeatAnswer);
         } else {
           if (!review().simulatorState().done) fail("Repeated deck did not finish");
@@ -3223,7 +3251,7 @@ class AnkiSimulatorSmokeTest {
         break;
       case Step::RepeatReleaseConsumed:
         if (!review().simulatorState().done) fail("Final rating input accidentally restarted the deck");
-        checkPending(10, 0);
+        checkPending(16, 0);
         captureOrientations("repeat-completion");
         button(MappedInputManager::Button::Back, Step::CompletedList);
         break;
@@ -3233,19 +3261,18 @@ class AnkiSimulatorSmokeTest {
         break;
       case Step::CompletedOpened:
         if (!review().simulatorState().done) fail("Completed deck list row did not open completion");
-        checkPending(10, 0);
+        checkPending(16, 0);
         tapAction(7, Step::RepeatFromList);
         break;
       case Step::RepeatFromList:
         checkCard(0);
-        checkPending(10, 5);
+        checkPending(16, 5);
         button(MappedInputManager::Button::Back, Step::RepeatDone);
         break;
       case Step::RepeatDone:
         requireActivity("AnkiHome");
-        checkPending(10, 5);
-        LOG_INF("ANKI-SMOKE",
-                "Anki simulator repeat passed: partial-pass restart, completed list, touch and release guard");
+        checkPending(16, 5);
+        LOG_INF("ANKI-SMOKE", "Anki simulator repeat passed: retry resume, alternating cards, touch and release guard");
         std::_Exit(0);
       case Step::SyncHome:
         requireActivity("AnkiHome");
@@ -3334,6 +3361,8 @@ class AnkiSimulatorSmokeTest {
     CardTwo,
     CardTwoReleaseConsumed,
     GoodAnswer,
+    RetryAgain,
+    RetryAgainAnswer,
     CardThree,
     EasyAnswer,
     CardFour,
@@ -3346,6 +3375,10 @@ class AnkiSimulatorSmokeTest {
     FrontlightReturned,
     RestartAnswer,
     RestartRating,
+    RestartRetryAgain,
+    RestartRetryAgainAnswer,
+    RestartRetryHard,
+    RestartRetryHardAnswer,
     Completed,
     RepeatStarted,
     RepeatFirstAnswer,
@@ -3376,7 +3409,10 @@ class AnkiSimulatorSmokeTest {
   uint8_t theme = 0;
   bool restart = false;
   bool resumeRepeat = false;
-  uint16_t repeatOrdinal = 0;
+  static constexpr uint16_t kRepeatOrdinals[] = {1, 2, 0, 3, 1, 4, 2};
+  static constexpr uint8_t kRepeatActions[] = {3, 4, 6, 6, 6, 6, 6};
+  static constexpr uint16_t kRepeatRemaining[] = {5, 5, 5, 4, 3, 2, 1};
+  uint16_t repeatIndex = 0;
   uint32_t layoutPasses = 0;
   size_t initialHandles = 0;
   size_t initialThreads = 0;

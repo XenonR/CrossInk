@@ -1,13 +1,30 @@
 # Anki on X4 Pro
 
-## First release contract
+## Review contract
 
 The firmware reviews a downloaded due-card batch, not a complete Anki collection.
-Each card receives one rating per pass, including Again. Completed decks can be
-repeated offline; every pass's ratings are uploaded in order. Anki Desktop owns
-scheduling; reconnect to obtain the next batch. Text, line breaks and basic bold
-are supported. Images, audio, HTML templates, local scheduling and discovery are
-outside this release.
+Again and Hard keep a card in the local review queue; Good and Easy complete it.
+Completed decks can be repeated offline, and every saved rating is uploaded in
+order. Anki Desktop owns long-term scheduling; reconnect to obtain the next batch.
+The existing desktop add-on needs no changes. Text, line breaks and basic bold
+are supported. Images, audio, HTML templates, timed learning steps, FSRS and
+discovery are outside this release.
+
+| Rating | Local effect |
+| --- | --- |
+| Again | Repeat after two intervening saved answers in this deck |
+| Hard | Repeat after five intervening saved answers in this deck |
+| Good / Easy | Complete the card for this pass |
+
+Ready repeats alternate with untouched cards when both are available. Repeats
+are selected by earliest eligible answer count across Again and Hard, with ties
+resolved by original card order. Untouched cards keep their downloaded order.
+If there is no other available card, the earliest waiting repeat appears
+immediately. Spacing is therefore a target: alternation can delay a repeat, and
+small decks can shorten its gap. A one-card deck repeats Again or Hard immediately.
+Only successfully saved answers in this deck advance the gap; revealing, paging,
+leaving the screen or reviewing another deck does not. This is a small offline
+queue, not Desktop's configurable learning-step scheduler.
 
 ## Using Anki
 
@@ -22,12 +39,15 @@ outside this release.
 4. Select a deck, read the question, reveal the answer and rate it. Use swipes
    or side buttons to page through long content. Physical Confirm reveals the
    answer, then opens a rating selector; confirm the selected rating to save it.
+   Again and Hard return the card later in the same pass. The deck finishes only
+   when every card has received Good or Easy.
 5. When a deck is complete, choose **Repeat deck** to review all its downloaded
    cards again. You can also select a completed deck from the Anki list to reach
    this action. Touch or physical Confirm starts a pass; Back returns to the list.
    Additional ratings will sync to Anki Desktop, including ratings of cards
    previously marked Good or Easy. Leaving, sleeping or restarting retains
-   accepted ratings; selecting an unfinished deck resumes its remaining cards.
+   accepted ratings and the same next-card order; selecting an unfinished deck
+   resumes its queue.
 6. Sync again to upload all saved ratings and replace the batch with Desktop's
    current due cards. There is no automatic or background synchronization.
 
@@ -89,8 +109,12 @@ Transfer allocations are bounded: a 512 KiB record buffer and 128 KiB JSON arena
 in PSRAM. Metadata can exceed 400 KiB for 1,000 unusually named decks. Card sides
 are bounded to 16 KiB decoded UTF-8 bytes, snapshots to 1,000 cards/decks and
 64 MiB wire bytes. Oversized desktop settings fail without replacing installed
-content. Review screens need one side buffer, a 125-byte reviewed bitmap and
-small pagination state; there is no second framebuffer.
+content. Review screens need one side buffer, a 125-byte completion bitmap,
+small pagination state and a fallible `uint32_t` queue array of at most 4,000
+bytes for 1,000 cards. The array is reused throughout a review and freed when
+the store closes; fixed queue fields and allocator overhead are additional.
+Home and sync do not allocate the array. It uses the default allocator, which
+prefers internal RAM for this size on X4 Pro. There is no second framebuffer.
 
 `/.crossink-anki/` is persistent application data, separate from reading caches.
 An immutable binary snapshot contains its own card index and deck directory.
@@ -99,22 +123,34 @@ is accepted only after write, sync and close succeed. Activation preserves the
 previous valid snapshot/journal pair. Recovery validates integrity and generation;
 missing/mismatched journals never mean that every card is unreviewed.
 
-Journal version 2 adds a durable deck-restart marker. It resets only the selected
-deck's current-pass progress and retains all earlier reviews and acknowledgments.
-Existing version 1 journals remain readable and are upgraded on their first
-repeat through a synced copy, preserving the original. Card snapshots remain
-version 1. Do not clear Anki data to enable repeats.
+Journal version 3 adds learning-rating events. Again and Hard record a retry;
+Good and Easy complete the card. On review entry, sequential snapshot and journal
+scans rebuild deck membership, the deck's saved-answer counter and retry order,
+including ratings of cards completed later. Acknowledgment affects upload state,
+not retry eligibility or completion. A successful sync replaces the local queue
+with Desktop's next downloaded batch; a failed download preserves the current
+batch and queue.
+
+Versions 1 and 2 remain readable. Their legacy rating events keep the original
+meaning: every rating completed a card, including Again and Hard. Version 2's
+durable deck-restart marker continues to reset only the selected deck's current
+pass, preserving earlier reviews and acknowledgments. Older journals upgrade
+through a synced copy before new learning events are written, preserving the
+original, review sequences, prepared payloads and batch IDs. Card snapshots stay
+at version 1. Do not clear Anki data to enable learning repeats.
 
 FAT rename is not a physical atomicity guarantee. Tests must interrupt each
 activation step; real SD power-cut tests remain a release requirement.
 
 ## Source review and resource tradeoffs (2026-11-01)
 
-The review covers the Anki store, protocol decoder, HTTP transaction path,
+This historical review describes the implementation before the learning queue;
+its operation counts and measurements are that earlier baseline. The review
+covers the Anki store, protocol decoder, HTTP transaction path,
 connection settings, sync worker, review/deck activities, text layout and their
 tests. Fixes stay within Anki; the SDK, shared persistence and general HTTP
-behavior are unchanged. No scheduler, collection format, settings or dependency
-was added.
+behavior are unchanged. No long-term scheduler, collection format, settings or
+dependency was added.
 
 The main correctness changes are:
 
@@ -164,8 +200,8 @@ The snapshot deliberately reserves a 256-byte deck slot per downloaded card.
 Its size remains `128 + 296 * card_count + front/back UTF-8 bytes`. The journal
 retains 64-byte events after its 96-byte header; ratings, repeat markers and
 upload transitions keep their existing write/sync/close guarantees. Old journals,
-backups and recovery reports remain as evidence. No compaction or format
-migration is introduced to save space at the expense of recovery complexity.
+backups and recovery reports remain as evidence. No compaction is introduced;
+version 3 upgrades change the header while preserving historical event bytes.
 
 Backward paging still rebuilds preceding pages instead of allocating a page
 history. Contextual text measurement is retained for kerning and shaping.
@@ -184,6 +220,26 @@ can share the generic rejected-download result. Physical SD durability and runti
 heap/PSRAM/stack margins still need the acceptance checks below.
 
 ## Validation and release acceptance
+
+The automated results below are historical checks of the previous one-rating
+per-card behavior. They do not establish correctness of the learning queue.
+
+### Learning queue acceptance (pending)
+
+- Run native coverage for Again/Hard gaps, alternation, earliest-due selection
+  across ratings, original-order ties, rating changes, small decks and completion.
+  Confirm that failed writes do not advance the queue and other decks do not
+  advance its answer counter.
+- Check identical next-card selection after leaving, sleeping and restarting;
+  include completed-card history, legacy version 1/2 journals, version 2 restart
+  events, torn events and interrupted version 3 upgrades. Inject allocation and
+  storage failures without discarding saved ratings.
+- Exercise protocols 2 and 3 with repeated ratings across upload batch boundaries,
+  immutable prepared uploads, acknowledgments that preserve retries, successful
+  next-batch replacement and failed downloads that retain progress.
+- Run scoped Anki static analysis, both protocol simulator flows, the broad
+  simulator smoke and X4 Pro, X4 Pro simulator, C3 and Sticky builds. Record new
+  image sizes and runtime memory separately from historical measurements below.
 
 ### Automated results (2026-10-31)
 
@@ -295,23 +351,34 @@ No physical-device or live Anki Desktop results are claimed. Before release:
    confirmation: the original address/token must remain. Rapid Confirm presses
    must wait for each new screen. Hold Confirm while touch-grading a nonfinal
    card, then release it: the next question must remain unrevealed.
+   Use a deck of at least eight cards: Again should return after two saved answers
+   and Hard after five when enough other cards are available. Mix both ratings
+   and untouched cards to check alternation and earliest-due ordering. Sleep
+   before a repeat is due, then resume: the next-card order must be unchanged.
+   Confirm a one-card deck repeats Again/Hard immediately. Finish every card with
+   Good or Easy; only then should the completion screen appear.
    Complete a deck and repeat it using physical Confirm, leave midway, sleep or
    restart, then resume and finish. Open the completed deck from the list and
    repeat using touch. Sync and inspect Desktop's review history: every pass's
-   ratings must appear in order. Release a Confirm held during the last touch
+   ratings, including every Again/Hard retry, must appear in order. Confirm that
+   the new downloaded batch replaces the local queue. Release a Confirm held during the last touch
    rating; it must leave the completion screen visible.
 2. Interrupt power during journal writes and snapshot activation. Exercise SD
    full/removal, cancelled downloads and desktop timeout/crash. Accepted local
    ratings must survive; failed writes must keep the current card ungraded;
    interrupted downloads must preserve a matching installed snapshot/journal.
-   Include deck-restart writes and a version 1 journal's first repeat/upgrade.
-   Earlier ratings must survive with either completed or restarted pass progress.
+   Include deck-restart writes, learning-rating writes and version 1/2 journal
+   upgrades to version 3. Earlier ratings and prepared uploads must survive;
+   legacy ratings retain their completed-card meaning. A failed download after
+   an acknowledged upload must retain the current local retries.
 3. Lose or partially deliver a push receipt, then restart. Confirm uploads pause,
    export the SD report, reconcile in Desktop, and use **Handled in Anki Desktop**.
    Check that uncertain events are retained and never automatically replayed.
 4. Repeat review/sync/exit cycles while recording internal free heap and largest
    allocatable block, PSRAM free/largest block and the sync worker stack margin
    (`ANKI` completion log). Simulator heap/stack placeholders are not measurements.
+   Include a 1,000-card deck and repeated review entry/exit to check the at-most
+   4,000-byte queue allocation is released and heap/stack margins remain safe.
 5. Exit to EPUB reading, use frontlight and Home, then enter/leave USB Drive.
    No EPUB cache reset is required by this feature. Keep `/.crossink-anki/` intact
    while investigating recovery; it contains review evidence, not a reading cache.

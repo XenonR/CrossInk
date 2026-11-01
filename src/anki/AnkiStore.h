@@ -28,8 +28,12 @@ class AnkiStore {
   bool readSide(uint16_t ordinal, bool answer, char* out, size_t capacity);
   // Returns false without failed() when the selected deck has no remaining cards.
   bool nextUnreviewed(int64_t deckId, uint16_t start, CardInfo& out);
+  // Review-only workspace; home/sync stores never allocate a schedule.
+  bool beginReview(int64_t deckId);
+  // Read-only selection: false without failed() means the deck is complete.
+  bool nextReviewCard(CardInfo& out);
   bool recordReview(uint16_t ordinal, uint8_t ease, uint32_t durationMs, uint64_t answeredAtMs = 0);
-  // Start another pass only after every card in this deck has been rated.
+  // Start another pass only after every card in this deck is complete.
   bool restartDeck(int64_t deckId);
 
   bool beginSnapshot(const char* generation, uint16_t count);
@@ -51,6 +55,10 @@ class AnkiStore {
   char generation_[MAX_GENERATION_BYTES + 1] = {};
   using ReviewedBits = std::array<uint8_t, (MAX_CARDS + 7) / 8>;
   ReviewedBits reviewed_{};
+  std::unique_ptr<uint32_t[]> reviewSchedule_;
+  int64_t reviewDeckId_ = 0;
+  uint32_t reviewTurn_ = 0;
+  bool lastWasRetry_ = false;
   uint16_t cardCount_ = 0;
   uint16_t deckCount_ = 0;
   uint16_t journalVersion_ = 0;
@@ -67,6 +75,8 @@ class AnkiStore {
   bool failed_ = false;
   bool appendEvent(uint8_t type, const Review* review = nullptr, int64_t deckId = 0);
   bool completedDeckMask(int64_t deckId, ReviewedBits& mask);
+  void resetReviewSchedule();
+  void applyReviewSchedule(uint16_t ordinal, uint8_t ease, bool learning);
   bool upgradeJournal();
   bool recoverJournal();
   bool validateSnapshot(const char* path, bool adopt);

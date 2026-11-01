@@ -30,14 +30,18 @@ class AnkiServer(ThreadingHTTPServer):
         self.generation = f"anki-smoke-empty-p{version}"
         self.requests: list[tuple[str, str]] = []
         self.batches: list[str] = []
+        self.batch_sizes: list[int] = []
         self.reviews: list[tuple[int, int]] = []
         self.errors: list[str] = []
 
     def validate(self) -> None:
-        expected = [(7000, 1), (7001, 2), (7002, 3), (7003, 4), (7004, 3)]
-        expected += [(card_id, 4) for card_id in range(7000, 7005)]
-        if self.errors or self.reviews != expected or len(self.batches) != 2:
-            raise AssertionError(f"Unexpected protocol {self.version} upload: {self.errors}, {self.reviews}")
+        expected = [(7000, 1), (7001, 2), (7002, 3), (7000, 1), (7003, 4),
+                    (7004, 3), (7000, 3), (7001, 3)]
+        expected += [(7000, 1), (7001, 1), (7002, 2), (7000, 4),
+                     (7003, 4), (7001, 4), (7004, 4), (7002, 4)]
+        if self.errors or self.reviews != expected or self.batch_sizes != [5, 11]:
+            raise AssertionError(f"Unexpected protocol {self.version} upload: {self.errors}, "
+                                 f"reviews={self.reviews}, batches={self.batch_sizes}")
         if self.requests != [("GET", "/health"), ("POST", "/push"), ("POST", "/push"), ("GET", "/pull")]:
             raise AssertionError(f"Unexpected request order or duplicate upload: {self.requests}")
 
@@ -121,6 +125,7 @@ class AnkiHandler(BaseHTTPRequestHandler):
             self.require(False, f"Invalid push body: {error}")
             return
         self.server.batches.append(batch_id)
+        self.server.batch_sizes.append(len(reviews))
         self.respond({"status": "success", "protocol_version": self.server.version,
                       "batch_id": batch_id, "processed": len(reviews), "rejected": []})
 
@@ -198,7 +203,7 @@ def main() -> int:
                 server.shutdown()
                 server.server_close()
                 thread.join(timeout=5)
-            print(f"Protocol {version}: ten original/repeated ratings uploaded once in two batches; empty snapshot installed.")
+            print(f"Protocol {version}: sixteen spaced-learning ratings uploaded once in two batches; empty snapshot installed.")
     return 0
 
 

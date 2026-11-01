@@ -87,7 +87,7 @@ class AnkiReviewActivity final : public Activity {
 #endif
   ScreenTransitionRefresh refresh;
 
-  void loadNextCard(uint16_t start);
+  void loadNextCard();
   void loadSide();
   void activateAction(int action);
   bool actionEnabled(int action) const;

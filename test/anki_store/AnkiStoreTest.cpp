@@ -1,3 +1,4 @@
+#include <Memory.h>
 #include <gtest/gtest.h>
 
 #include "AnkiStore.h"
@@ -15,7 +16,10 @@ void checksum(std::vector<uint8_t>& bytes, const size_t offset, const size_t len
 
 class StoreTest : public ::testing::Test {
  protected:
-  void SetUp() override { Storage = {}; }
+  void SetUp() override {
+    Storage = {};
+    anki_test_memory::reset();
+  }
   bool install(anki::AnkiStore& store, const char* generation = "generation-one", uint16_t count = 3) {
     if (!store.beginSnapshot(generation, count)) return false;
     for (uint16_t i = 0; i < count; ++i) {
@@ -25,16 +29,37 @@ class StoreTest : public ::testing::Test {
     }
     return store.commitSnapshot();
   }
+  bool installSingleDeck(anki::AnkiStore& store, uint16_t count, const char* generation = "learning") {
+    if (!store.beginSnapshot(generation, count)) return false;
+    for (uint16_t i = 0; i < count; ++i) {
+      const anki::CardInput card{int64_t(100 + i), 1, "First", "Question", "Answer", 8, 6};
+      if (!store.appendCard(card)) return false;
+    }
+    return store.commitSnapshot();
+  }
+  ::testing::AssertionResult nextIs(anki::AnkiStore& store, uint16_t ordinal) {
+    anki::CardInfo card;
+    if (!store.nextReviewCard(card)) return ::testing::AssertionFailure() << "No next card; failed=" << store.failed();
+    if (card.ordinal != ordinal)
+      return ::testing::AssertionFailure() << "Expected ordinal " << ordinal << ", got " << card.ordinal;
+    return ::testing::AssertionSuccess();
+  }
   std::string journal() const {
     for (const auto& [path, bytes] : Storage.files)
       if (path.ends_with(".log")) return path;
     return {};
   }
-  void useVersionOneJournal() {
+  void useLegacyJournal(uint16_t version = 1) {
     auto& bytes = Storage.files[journal()];
-    bytes[4] = 1;
-    bytes[5] = 0;
+    bytes[4] = version;
+    bytes[5] = version >> 8;
     checksum(bytes, 0, 92);
+    for (size_t offset = 96; offset < bytes.size(); offset += 64) {
+      if (bytes[offset + 4] == 8) {
+        bytes[offset + 4] = 1;
+        checksum(bytes, offset, 60);
+      }
+    }
   }
 };
 TEST_F(StoreTest, EmptyStoreAndSnapshotRoundTrip) {
@@ -176,7 +201,7 @@ TEST_F(StoreTest, RatingsSurviveAndCannotBeRecordedTwice) {
   anki::AnkiStore store;
   ASSERT_TRUE(store.open());
   ASSERT_TRUE(install(store));
-  ASSERT_TRUE(store.recordReview(0, 1, 1234, 1790000000000ULL));
+  ASSERT_TRUE(store.recordReview(0, 3, 1234, 1790000000000ULL));
   EXPECT_FALSE(store.recordReview(0, 3, 1234));
   ASSERT_TRUE(store.open());
   EXPECT_EQ(store.pendingCount(), 1);
@@ -495,7 +520,7 @@ TEST_F(StoreTest, EveryJournalRepairCheckpointKeepsAllAcceptedReviewsAndEarlierE
   Storage.files[path].push_back(1);
   const auto earlierEvidence = Storage.files[path];
   ASSERT_TRUE(store.open());
-  ASSERT_TRUE(store.recordReview(1, 2, 15));
+  ASSERT_TRUE(store.recordReview(1, 3, 15));
   Storage.files[path].push_back(2);
   Storage.captureCheckpoints = true;
   ASSERT_TRUE(store.open());
@@ -568,9 +593,9 @@ TEST_F(StoreTest, RepeatsCompletedDecksIndependentlyAndResumesPartialPasses) {
   EXPECT_FALSE(store.restartDeck(0));
   EXPECT_FALSE(store.restartDeck(99));
   EXPECT_FALSE(store.restartDeck(1));
-  ASSERT_TRUE(store.recordReview(0, 1, 10));
+  ASSERT_TRUE(store.recordReview(0, 3, 10));
   EXPECT_FALSE(store.restartDeck(1));
-  ASSERT_TRUE(store.recordReview(2, 2, 20));
+  ASSERT_TRUE(store.recordReview(2, 4, 20));
   ASSERT_TRUE(store.recordReview(1, 3, 30));
   ASSERT_TRUE(store.restartDeck(1));
   ASSERT_TRUE(store.recordReview(0, 4, 40));
@@ -584,14 +609,14 @@ TEST_F(StoreTest, RepeatsCompletedDecksIndependentlyAndResumesPartialPasses) {
   EXPECT_FALSE(store.restartDeck(1));
   ASSERT_TRUE(store.recordReview(2, 3, 50));
   ASSERT_TRUE(store.restartDeck(2));
-  ASSERT_TRUE(store.recordReview(1, 2, 60));
+  ASSERT_TRUE(store.recordReview(1, 4, 60));
   ASSERT_TRUE(store.open());
   EXPECT_EQ(store.pendingCount(), 6U);
   anki::UploadBatch batch;
   ASSERT_TRUE(store.prepareUpload(batch));
   ASSERT_EQ(batch.count, 6);
   const int64_t ids[] = {100, 102, 101, 100, 102, 101};
-  const uint8_t ratings[] = {1, 2, 3, 4, 3, 2};
+  const uint8_t ratings[] = {3, 4, 3, 4, 3, 4};
   for (size_t i = 0; i < batch.count; ++i) {
     EXPECT_EQ(batch.reviews[i].sequence, i + 1);
     EXPECT_EQ(batch.reviews[i].cardId, ids[i]);
@@ -623,12 +648,12 @@ TEST_F(StoreTest, VersionOneUpgradeKeepsPreparedPayloadAndAcknowledgements) {
   ASSERT_TRUE(store.recordReview(0, 1, 123));
   anki::UploadBatch original, batch;
   ASSERT_TRUE(store.prepareUpload(original));
-  useVersionOneJournal();
+  useLegacyJournal();
   const auto path = journal();
   const auto previous = Storage.files[path];
   ASSERT_TRUE(store.open());
   ASSERT_TRUE(store.restartDeck(1));
-  EXPECT_EQ(Storage.files[path][4], 2);
+  EXPECT_EQ(Storage.files[path][4], 3);
   EXPECT_EQ(Storage.files[path + ".damaged"], previous);
   ASSERT_TRUE(store.recordReview(0, 4, 456));
   ASSERT_TRUE(store.open());
@@ -662,7 +687,7 @@ TEST_F(StoreTest, EveryUpgradeAndRestartCheckpointPreservesEarlierRatingsAndBatc
   ASSERT_TRUE(store.recordReview(0, 2, 123));
   anki::UploadBatch original;
   ASSERT_TRUE(store.prepareUpload(original));
-  useVersionOneJournal();
+  useLegacyJournal();
   ASSERT_TRUE(store.open());
   Storage.captureCheckpoints = true;
   ASSERT_TRUE(store.restartDeck(1));
@@ -741,7 +766,7 @@ TEST_F(StoreTest, RestartWithUnknownDeckOrOldVersionIsRejectedEvenWithValidCheck
     ASSERT_TRUE(store.recordReview(0, 3, 10));
     ASSERT_TRUE(store.restartDeck(1));
     if (oldVersion) {
-      useVersionOneJournal();
+      useLegacyJournal();
     } else {
       auto& bytes = Storage.files[journal()];
       bytes[bytes.size() - 64 + 48] = 99;
@@ -760,7 +785,7 @@ TEST_F(StoreTest, RepeatedReviewsUploadSequentiallyWithoutRescanningEarlierBatch
       ASSERT_TRUE(store.restartDeck(1));
       ASSERT_TRUE(store.restartDeck(2));
     }
-    for (uint16_t i = 0; i < 40; ++i) ASSERT_TRUE(store.recordReview(i, pass + 1, 10));
+    for (uint16_t i = 0; i < 40; ++i) ASSERT_TRUE(store.recordReview(i, 3 + pass % 2, 10));
   }
   ASSERT_TRUE(store.open());
   Storage.bytesRead = 0;
@@ -770,7 +795,7 @@ TEST_F(StoreTest, RepeatedReviewsUploadSequentiallyWithoutRescanningEarlierBatch
     ASSERT_TRUE(store.prepareUpload(batch));
     for (uint8_t i = 0; i < batch.count; ++i, ++seen) {
       EXPECT_EQ(batch.reviews[i].cardId, 100 + seen % 40);
-      EXPECT_EQ(batch.reviews[i].ease, seen / 40 + 1);
+      EXPECT_EQ(batch.reviews[i].ease, 3 + (seen / 40) % 2);
     }
     ASSERT_TRUE(store.markUploadAttempted(batch.batchId));
     ASSERT_TRUE(store.acknowledgeUpload(batch.batchId));
@@ -795,5 +820,547 @@ TEST_F(StoreTest, PendingCountSurvivesMoreThanSixtyFiveThousandReviews) {
   anki::UploadBatch batch;
   ASSERT_TRUE(store.prepareUpload(batch));
   EXPECT_EQ(batch.count, 32);
+}
+
+TEST_F(StoreTest, AgainAndHardRequireTwoAndFiveOtherAcceptedAnswers) {
+  for (const uint8_t ease : {1, 2}) {
+    Storage = {};
+    anki::AnkiStore store;
+    ASSERT_TRUE(store.open());
+    ASSERT_TRUE(installSingleDeck(store, 8));
+    ASSERT_TRUE(store.beginReview(1));
+    ASSERT_TRUE(nextIs(store, 0));
+    ASSERT_TRUE(store.recordReview(0, ease, 10));
+    const uint16_t gap = ease == 1 ? 2 : 5;
+    for (uint16_t other = 1; other <= gap; ++other) {
+      SCOPED_TRACE(::testing::Message() << "ease=" << unsigned(ease) << ", other=" << other);
+      ASSERT_TRUE(nextIs(store, other));
+      ASSERT_TRUE(store.recordReview(other, 3, 10));
+    }
+    ASSERT_TRUE(nextIs(store, 0));
+    anki::Deck deck;
+    ASSERT_TRUE(store.readDeck(0, deck));
+    EXPECT_EQ(deck.remaining, 8 - gap);
+    EXPECT_FALSE(store.restartDeck(1));
+    ASSERT_TRUE(store.recordReview(0, 3, 10));
+    ASSERT_TRUE(nextIs(store, gap + 1));
+  }
+}
+
+TEST_F(StoreTest, ReadyRetriesAlternateWithUntouchedCardsAndReplayCompletedAnswers) {
+  anki::AnkiStore store;
+  ASSERT_TRUE(store.open());
+  ASSERT_TRUE(installSingleDeck(store, 8));
+  ASSERT_TRUE(store.beginReview(1));
+  ASSERT_TRUE(store.recordReview(0, 1, 10));
+  ASSERT_TRUE(store.recordReview(1, 1, 10));
+  ASSERT_TRUE(store.recordReview(2, 3, 10));
+  // Card 2 is already complete in the final bitmap. Its historical answer
+  // still advances the replayed turn and makes card 0 ready.
+  ASSERT_TRUE(store.open());
+  ASSERT_TRUE(store.beginReview(1));
+  ASSERT_TRUE(nextIs(store, 0));
+  ASSERT_TRUE(store.recordReview(0, 3, 10));
+  ASSERT_TRUE(store.open());
+  ASSERT_TRUE(store.beginReview(1));
+  // Card 1 is ready, but the last answer was a retry: show untouched card 3.
+  ASSERT_TRUE(nextIs(store, 3));
+  ASSERT_TRUE(store.recordReview(3, 3, 10));
+  ASSERT_TRUE(store.open());
+  ASSERT_TRUE(store.beginReview(1));
+  ASSERT_TRUE(nextIs(store, 1));
+  ASSERT_TRUE(store.recordReview(1, 4, 10));
+  ASSERT_TRUE(nextIs(store, 4));
+}
+
+TEST_F(StoreTest, EarliestReadyRetryWinsWithoutGivingAgainAFixedPriority) {
+  anki::AnkiStore store;
+  ASSERT_TRUE(store.open());
+  ASSERT_TRUE(installSingleDeck(store, 9));
+  ASSERT_TRUE(store.beginReview(1));
+  ASSERT_TRUE(store.recordReview(0, 2, 10));  // Ready after turn 6.
+  for (uint16_t i = 1; i <= 3; ++i) ASSERT_TRUE(store.recordReview(i, 3, 10));
+  ASSERT_TRUE(store.recordReview(4, 1, 10));  // Ready after turn 7.
+  ASSERT_TRUE(store.recordReview(5, 3, 10));
+  ASSERT_TRUE(nextIs(store, 0));
+  ASSERT_TRUE(store.recordReview(0, 3, 10));
+  ASSERT_TRUE(nextIs(store, 6));
+  ASSERT_TRUE(store.recordReview(6, 3, 10));
+  ASSERT_TRUE(nextIs(store, 4));
+}
+
+TEST_F(StoreTest, EqualReadyTurnsBreakTiesByCardOrdinal) {
+  anki::AnkiStore store;
+  ASSERT_TRUE(store.open());
+  ASSERT_TRUE(installSingleDeck(store, 9));
+  ASSERT_TRUE(store.beginReview(1));
+  ASSERT_TRUE(store.recordReview(3, 2, 10));
+  ASSERT_TRUE(store.recordReview(1, 3, 10));
+  ASSERT_TRUE(store.recordReview(2, 3, 10));
+  ASSERT_TRUE(store.recordReview(0, 1, 10));
+  ASSERT_TRUE(store.recordReview(4, 3, 10));
+  ASSERT_TRUE(store.recordReview(5, 3, 10));
+  // Both retries are ready at turn 6. The lower ordinal wins even though its
+  // Again rating came after the other card's Hard rating.
+  ASSERT_TRUE(nextIs(store, 0));
+  ASSERT_TRUE(store.recordReview(0, 3, 10));
+  ASSERT_TRUE(nextIs(store, 6));
+  ASSERT_TRUE(store.recordReview(6, 3, 10));
+  ASSERT_TRUE(nextIs(store, 3));
+}
+
+TEST_F(StoreTest, ChangingAgainToHardReplacesTheRetryInsteadOfDuplicatingIt) {
+  anki::AnkiStore store;
+  ASSERT_TRUE(store.open());
+  ASSERT_TRUE(installSingleDeck(store, 8));
+  ASSERT_TRUE(store.beginReview(1));
+  ASSERT_TRUE(store.recordReview(0, 1, 10));
+  ASSERT_TRUE(store.recordReview(1, 3, 10));
+  ASSERT_TRUE(store.recordReview(2, 3, 10));
+  ASSERT_TRUE(nextIs(store, 0));
+  ASSERT_TRUE(store.recordReview(0, 2, 10));
+  for (uint16_t i = 3; i < 8; ++i) {
+    ASSERT_TRUE(nextIs(store, i));
+    ASSERT_TRUE(store.recordReview(i, 3, 10));
+  }
+  ASSERT_TRUE(nextIs(store, 0));
+  ASSERT_TRUE(store.recordReview(0, 4, 10));
+  anki::CardInfo card;
+  EXPECT_FALSE(store.nextReviewCard(card));
+  EXPECT_FALSE(store.failed());
+  EXPECT_EQ(store.pendingCount(), 10U);
+}
+
+TEST_F(StoreTest, SmallDecksReturnTheEarliestRetryWithoutWaiting) {
+  anki::AnkiStore store;
+  ASSERT_TRUE(store.open());
+  ASSERT_TRUE(installSingleDeck(store, 2));
+  ASSERT_TRUE(store.beginReview(1));
+  ASSERT_TRUE(store.recordReview(0, 2, 10));
+  ASSERT_TRUE(nextIs(store, 1));
+  ASSERT_TRUE(store.recordReview(1, 1, 10));
+  // No untouched cards remain. Card 1 has an earlier retry than card 0.
+  ASSERT_TRUE(nextIs(store, 1));
+  ASSERT_TRUE(store.recordReview(1, 3, 10));
+  ASSERT_TRUE(nextIs(store, 0));
+  ASSERT_TRUE(store.recordReview(0, 4, 10));
+  anki::CardInfo card;
+  EXPECT_FALSE(store.nextReviewCard(card));
+  EXPECT_FALSE(store.failed());
+}
+
+TEST_F(StoreTest, OneCardKeepsRepeatingAgainAndHardUntilGoodOrEasy) {
+  for (const uint8_t passingEase : {3, 4}) {
+    Storage = {};
+    anki::AnkiStore store;
+    ASSERT_TRUE(store.open());
+    ASSERT_TRUE(installSingleDeck(store, 1));
+    ASSERT_TRUE(store.beginReview(1));
+    for (const uint8_t retryEase : {1, 2, 1, 2}) {
+      ASSERT_TRUE(nextIs(store, 0));
+      ASSERT_TRUE(store.recordReview(0, retryEase, 10));
+      anki::Deck deck;
+      ASSERT_TRUE(store.readDeck(0, deck));
+      EXPECT_EQ(deck.remaining, 1);
+    }
+    ASSERT_TRUE(store.open());
+    ASSERT_TRUE(store.beginReview(1));
+    ASSERT_TRUE(nextIs(store, 0));
+    ASSERT_TRUE(store.recordReview(0, passingEase, 10));
+    EXPECT_FALSE(store.recordReview(0, 1, 10));
+    anki::CardInfo card;
+    EXPECT_FALSE(store.nextReviewCard(card));
+    ASSERT_TRUE(store.open());
+    ASSERT_TRUE(store.beginReview(1));
+    EXPECT_FALSE(store.nextReviewCard(card));
+    EXPECT_EQ(store.pendingCount(), 5U);
+  }
+}
+
+TEST_F(StoreTest, OtherDeckAnswersDoNotAgeRetriesOrChangeAlternation) {
+  anki::AnkiStore store;
+  ASSERT_TRUE(store.open());
+  ASSERT_TRUE(install(store, "two-decks", 12));
+  ASSERT_TRUE(store.beginReview(1));
+  ASSERT_TRUE(store.recordReview(0, 1, 10));
+  ASSERT_TRUE(store.recordReview(2, 3, 10));
+  ASSERT_TRUE(store.beginReview(2));
+  for (const uint16_t ordinal : {1, 3, 5}) {
+    ASSERT_TRUE(nextIs(store, ordinal));
+    ASSERT_TRUE(store.recordReview(ordinal, 3, 10));
+  }
+  ASSERT_TRUE(store.beginReview(1));
+  ASSERT_TRUE(nextIs(store, 4));
+  ASSERT_TRUE(store.recordReview(4, 3, 10));
+  ASSERT_TRUE(nextIs(store, 0));
+  ASSERT_TRUE(store.recordReview(0, 3, 10));
+  // Grading another deck directly also cannot change this deck's last retry.
+  ASSERT_TRUE(store.recordReview(7, 3, 10));
+  ASSERT_TRUE(store.open());
+  ASSERT_TRUE(store.beginReview(1));
+  ASSERT_TRUE(nextIs(store, 6));
+}
+
+TEST_F(StoreTest, SelectingWithoutAnsweringIsIdempotentAndDoesNotAgeRetries) {
+  anki::AnkiStore store;
+  ASSERT_TRUE(store.open());
+  ASSERT_TRUE(installSingleDeck(store, 6));
+  ASSERT_TRUE(store.beginReview(1));
+  ASSERT_TRUE(store.recordReview(0, 1, 10));
+  for (int i = 0; i < 20; ++i) ASSERT_TRUE(nextIs(store, 1));
+  EXPECT_FALSE(store.recordReview(1, 0, 10));
+  EXPECT_FALSE(store.failed());
+  ASSERT_TRUE(nextIs(store, 1));
+  ASSERT_TRUE(store.open());
+  ASSERT_TRUE(store.beginReview(1));
+  ASSERT_TRUE(nextIs(store, 1));
+  ASSERT_TRUE(store.recordReview(1, 3, 10));
+  ASSERT_TRUE(nextIs(store, 2));
+}
+
+TEST_F(StoreTest, RestartClearsRetrySpacingAndAlternationOnlyForTheChosenDeck) {
+  anki::AnkiStore store;
+  ASSERT_TRUE(store.open());
+  ASSERT_TRUE(install(store, "restart-learning", 8));
+  ASSERT_TRUE(store.beginReview(2));
+  ASSERT_TRUE(store.recordReview(1, 2, 10));
+  ASSERT_TRUE(store.beginReview(1));
+  ASSERT_TRUE(store.recordReview(0, 1, 10));
+  ASSERT_TRUE(store.recordReview(2, 3, 10));
+  ASSERT_TRUE(store.recordReview(4, 3, 10));
+  ASSERT_TRUE(nextIs(store, 0));
+  ASSERT_TRUE(store.recordReview(0, 3, 10));
+  ASSERT_TRUE(store.recordReview(6, 4, 10));
+  ASSERT_TRUE(store.restartDeck(1));
+  ASSERT_TRUE(nextIs(store, 0));
+  ASSERT_TRUE(store.recordReview(0, 2, 10));
+  ASSERT_TRUE(nextIs(store, 2));
+  ASSERT_TRUE(store.open());
+  ASSERT_TRUE(store.beginReview(1));
+  ASSERT_TRUE(nextIs(store, 2));
+  ASSERT_TRUE(store.beginReview(2));
+  ASSERT_TRUE(nextIs(store, 3));
+  anki::Deck other;
+  ASSERT_TRUE(store.readDeck(1, other));
+  EXPECT_EQ(other.remaining, 4);
+}
+
+TEST_F(StoreTest, AcknowledgingRetryRatingsDoesNotCompleteThemWhenDownloadFails) {
+  anki::AnkiStore store;
+  ASSERT_TRUE(store.open());
+  ASSERT_TRUE(installSingleDeck(store, 1));
+  ASSERT_TRUE(store.beginReview(1));
+  for (const uint8_t ease : {1, 2}) {
+    ASSERT_TRUE(nextIs(store, 0));
+    ASSERT_TRUE(store.recordReview(0, ease, 10));
+    anki::UploadBatch batch;
+    ASSERT_TRUE(store.prepareUpload(batch));
+    ASSERT_TRUE(store.markUploadAttempted(batch.batchId));
+    ASSERT_TRUE(store.acknowledgeUpload(batch.batchId));
+    ASSERT_TRUE(store.beginSnapshot(ease == 1 ? "failed-pull-one" : "failed-pull-two", 1));
+    store.cancelSnapshot();
+    ASSERT_TRUE(store.open());
+    ASSERT_TRUE(store.beginReview(1));
+    ASSERT_TRUE(nextIs(store, 0));
+    EXPECT_EQ(store.pendingCount(), 0U);
+  }
+  ASSERT_TRUE(store.recordReview(0, 3, 10));
+  anki::CardInfo card;
+  EXPECT_FALSE(store.nextReviewCard(card));
+}
+
+TEST_F(StoreTest, RetryRatingsUploadOnceInOrderAcrossMultipleBatches) {
+  anki::AnkiStore store;
+  ASSERT_TRUE(store.open());
+  ASSERT_TRUE(installSingleDeck(store, 1));
+  ASSERT_TRUE(store.beginReview(1));
+  for (uint32_t i = 0; i < 40; ++i) {
+    ASSERT_TRUE(nextIs(store, 0));
+    ASSERT_TRUE(store.recordReview(0, 1 + i % 2, i + 1, 1790000000000ULL + i));
+  }
+  ASSERT_TRUE(store.recordReview(0, 4, 41, 1790000000040ULL));
+  ASSERT_TRUE(store.open());
+  uint32_t seen = 0;
+  while (store.pendingCount()) {
+    anki::UploadBatch batch;
+    ASSERT_TRUE(store.prepareUpload(batch));
+    EXPECT_EQ(batch.count, seen == 0 ? 32 : 9);
+    for (uint8_t i = 0; i < batch.count; ++i, ++seen) {
+      EXPECT_EQ(batch.reviews[i].sequence, seen + 1);
+      EXPECT_EQ(batch.reviews[i].cardId, 100);
+      EXPECT_EQ(batch.reviews[i].ease, seen == 40 ? 4 : 1 + seen % 2);
+      EXPECT_EQ(batch.reviews[i].durationMs, seen + 1);
+      EXPECT_EQ(batch.reviews[i].answeredAtMs, 1790000000000ULL + seen);
+    }
+    ASSERT_TRUE(store.markUploadAttempted(batch.batchId));
+    ASSERT_TRUE(store.acknowledgeUpload(batch.batchId));
+  }
+  EXPECT_EQ(seen, 41U);
+  ASSERT_TRUE(store.open());
+  ASSERT_TRUE(store.beginReview(1));
+  anki::CardInfo card;
+  EXPECT_FALSE(store.nextReviewCard(card));
+}
+
+TEST_F(StoreTest, NewLearningEventsRequireVersionThree) {
+  for (const uint16_t version : {1, 2, 3}) {
+    Storage = {};
+    anki::AnkiStore store;
+    ASSERT_TRUE(store.open());
+    ASSERT_TRUE(installSingleDeck(store, 1));
+    ASSERT_TRUE(store.recordReview(0, 1, 10));
+    auto& bytes = Storage.files[journal()];
+    ASSERT_EQ(bytes[4], 3);
+    ASSERT_EQ(bytes[96 + 4], 8);
+    bytes[4] = version;
+    checksum(bytes, 0, 92);
+    EXPECT_EQ(store.open(), version == 3);
+  }
+}
+
+TEST_F(StoreTest, LegacyAgainAndHardStayCompleteAcrossFirstLearningRatingUpgrade) {
+  for (const uint16_t version : {1, 2}) {
+    Storage = {};
+    anki::AnkiStore store;
+    ASSERT_TRUE(store.open());
+    ASSERT_TRUE(installSingleDeck(store, 3));
+    ASSERT_TRUE(store.recordReview(0, 1, 11));
+    ASSERT_TRUE(store.recordReview(1, 2, 22));
+    anki::UploadBatch original;
+    ASSERT_TRUE(store.prepareUpload(original));
+    useLegacyJournal(version);
+    const auto path = journal();
+    const auto previous = Storage.files[path];
+    ASSERT_TRUE(store.open());
+    ASSERT_TRUE(store.beginReview(1));
+    ASSERT_TRUE(nextIs(store, 2));
+    ASSERT_TRUE(store.recordReview(2, 1, 33));
+    EXPECT_EQ(Storage.files[path][4], 3);
+    EXPECT_EQ(Storage.files[path + ".damaged"], previous);
+    ASSERT_TRUE(store.open());
+    ASSERT_TRUE(store.beginReview(1));
+    ASSERT_TRUE(nextIs(store, 2));
+    anki::Deck deck;
+    ASSERT_TRUE(store.readDeck(0, deck));
+    EXPECT_EQ(deck.remaining, 1);
+    anki::UploadBatch unchanged;
+    ASSERT_TRUE(store.prepareUpload(unchanged));
+    EXPECT_STREQ(unchanged.batchId, original.batchId);
+    ASSERT_EQ(unchanged.count, 2);
+    EXPECT_EQ(unchanged.reviews[0].ease, 1);
+    EXPECT_EQ(unchanged.reviews[0].durationMs, 11U);
+    EXPECT_EQ(unchanged.reviews[1].ease, 2);
+    EXPECT_EQ(unchanged.reviews[1].durationMs, 22U);
+    ASSERT_TRUE(store.markUploadAttempted(unchanged.batchId));
+    ASSERT_TRUE(store.acknowledgeUpload(unchanged.batchId));
+    anki::UploadBatch learning;
+    ASSERT_TRUE(store.prepareUpload(learning));
+    ASSERT_EQ(learning.count, 1);
+    EXPECT_EQ(learning.reviews[0].sequence, 3U);
+    EXPECT_EQ(learning.reviews[0].ease, 1);
+    EXPECT_EQ(learning.reviews[0].durationMs, 33U);
+  }
+}
+
+TEST_F(StoreTest, LegacyVersionTwoRestartsReplayBeforeNewLearningEvents) {
+  anki::AnkiStore store;
+  ASSERT_TRUE(store.open());
+  ASSERT_TRUE(installSingleDeck(store, 2));
+  ASSERT_TRUE(store.recordReview(0, 3, 10));
+  ASSERT_TRUE(store.recordReview(1, 4, 10));
+  ASSERT_TRUE(store.restartDeck(1));
+  ASSERT_TRUE(store.recordReview(0, 1, 10));
+  ASSERT_TRUE(store.recordReview(1, 2, 10));
+  useLegacyJournal(2);
+  ASSERT_TRUE(store.open());
+  ASSERT_TRUE(store.beginReview(1));
+  anki::CardInfo card;
+  EXPECT_FALSE(store.nextReviewCard(card));
+  ASSERT_TRUE(store.restartDeck(1));
+  ASSERT_TRUE(store.recordReview(0, 1, 10));
+  ASSERT_TRUE(store.recordReview(1, 2, 10));
+  ASSERT_TRUE(store.open());
+  ASSERT_TRUE(store.beginReview(1));
+  ASSERT_TRUE(nextIs(store, 0));
+  ASSERT_TRUE(store.recordReview(0, 3, 10));
+  ASSERT_TRUE(nextIs(store, 1));
+  ASSERT_TRUE(store.recordReview(1, 4, 10));
+  EXPECT_FALSE(store.nextReviewCard(card));
+  EXPECT_EQ(store.pendingCount(), 8U);
+}
+
+TEST_F(StoreTest, EveryFirstLearningUpgradeCheckpointPreservesLegacyRatingsAndPreparedBatch) {
+  anki::AnkiStore store;
+  ASSERT_TRUE(store.open());
+  ASSERT_TRUE(installSingleDeck(store, 2));
+  ASSERT_TRUE(store.recordReview(0, 3, 10));
+  anki::UploadBatch original;
+  ASSERT_TRUE(store.prepareUpload(original));
+  useLegacyJournal(2);
+  ASSERT_TRUE(store.open());
+  ASSERT_TRUE(store.beginReview(1));
+  Storage.captureCheckpoints = true;
+  ASSERT_TRUE(store.recordReview(1, 1, 20));
+  Storage.captureCheckpoints = false;
+  const auto checkpoints = std::move(Storage.checkpoints);
+  ASSERT_FALSE(checkpoints.empty());
+  for (size_t i = 0; i < checkpoints.size(); ++i) {
+    SCOPED_TRACE(i);
+    Storage.files = checkpoints[i];
+    Storage.handles.clear();
+    anki::AnkiStore restarted;
+    ASSERT_TRUE(restarted.open());
+    EXPECT_TRUE(restarted.pendingCount() == 1 || restarted.pendingCount() == 2);
+    anki::UploadBatch batch;
+    ASSERT_TRUE(restarted.prepareUpload(batch));
+    EXPECT_STREQ(batch.batchId, original.batchId);
+    ASSERT_EQ(batch.count, 1);
+    EXPECT_EQ(batch.reviews[0].sequence, 1U);
+    EXPECT_EQ(batch.reviews[0].ease, 3);
+    EXPECT_EQ(batch.reviews[0].durationMs, 10U);
+    ASSERT_TRUE(restarted.beginReview(1));
+    ASSERT_TRUE(nextIs(restarted, 1));
+    anki::Deck deck;
+    ASSERT_TRUE(restarted.readDeck(0, deck));
+    EXPECT_EQ(deck.remaining, 1);
+  }
+}
+
+TEST_F(StoreTest, TornRetryRatingRestoresTheLastAcceptedRetry) {
+  anki::AnkiStore store;
+  ASSERT_TRUE(store.open());
+  ASSERT_TRUE(installSingleDeck(store, 1));
+  ASSERT_TRUE(store.recordReview(0, 1, 10));
+  ASSERT_TRUE(store.recordReview(0, 2, 20));
+  auto& bytes = Storage.files[journal()];
+  bytes.resize(bytes.size() - 7);
+  ASSERT_TRUE(store.open());
+  EXPECT_EQ(store.pendingCount(), 1U);
+  ASSERT_TRUE(store.beginReview(1));
+  ASSERT_TRUE(nextIs(store, 0));
+  anki::UploadBatch batch;
+  ASSERT_TRUE(store.prepareUpload(batch));
+  ASSERT_EQ(batch.count, 1);
+  EXPECT_EQ(batch.reviews[0].ease, 1);
+  ASSERT_TRUE(store.recordReview(0, 3, 30));
+  anki::CardInfo card;
+  EXPECT_FALSE(store.nextReviewCard(card));
+}
+
+TEST_F(StoreTest, FailedRetryWritesDoNotAdvanceAcceptedCountsOrInventAnswers) {
+  for (int mode = 0; mode < 3; ++mode) {
+    Storage = {};
+    anki::AnkiStore store;
+    ASSERT_TRUE(store.open());
+    ASSERT_TRUE(installSingleDeck(store, 5));
+    ASSERT_TRUE(store.beginReview(1));
+    ASSERT_TRUE(store.recordReview(0, 1, 10));
+    ASSERT_TRUE(nextIs(store, 1));
+    if (mode == 0) Storage.failWrite = true;
+    if (mode == 1) Storage.failSync = true;
+    if (mode == 2) Storage.failAfter = 7;  // readCard, then append's close.
+    EXPECT_FALSE(store.recordReview(1, 3, 20));
+    EXPECT_EQ(store.pendingCount(), 1U);
+    anki::CardInfo card;
+    EXPECT_FALSE(store.nextReviewCard(card));
+    ASSERT_TRUE(store.open());
+    ASSERT_TRUE(store.beginReview(1));
+    // A complete synced/closed-looking event can survive a reported failure;
+    // a partial write must not. Neither case may create an extra answer turn.
+    ASSERT_TRUE(nextIs(store, store.pendingCount() == 1 ? 1 : 2));
+  }
+}
+
+TEST_F(StoreTest, ReviewScheduleIsAllocatedOnlyOnDemandAndReusedUntilClose) {
+  anki::AnkiStore store;
+  ASSERT_TRUE(store.open());
+  ASSERT_TRUE(installSingleDeck(store, anki::MAX_CARDS));
+  EXPECT_EQ(anki_test_memory::arrayAllocationCalls, 0U);
+  ASSERT_TRUE(store.beginReview(1));
+  EXPECT_EQ(anki_test_memory::arrayAllocationCalls, 1U);
+  EXPECT_EQ(anki_test_memory::lastArrayBytes, size_t(anki::MAX_CARDS) * sizeof(uint32_t));
+  for (int i = 0; i < 20; ++i) ASSERT_TRUE(nextIs(store, 0));
+  ASSERT_TRUE(store.recordReview(0, 1, 10));
+  ASSERT_TRUE(nextIs(store, 1));
+  ASSERT_TRUE(store.recordReview(1, 3, 10));
+  ASSERT_TRUE(nextIs(store, 2));
+  EXPECT_EQ(anki_test_memory::arrayAllocationCalls, 1U);
+  store.close();
+  anki::CardInfo card;
+  EXPECT_FALSE(store.nextReviewCard(card));
+  ASSERT_TRUE(store.open());
+  EXPECT_EQ(anki_test_memory::arrayAllocationCalls, 1U);
+  ASSERT_TRUE(store.beginReview(1));
+  EXPECT_EQ(anki_test_memory::arrayAllocationCalls, 2U);
+  ASSERT_TRUE(nextIs(store, 2));
+  for (const auto& [path, handles] : Storage.handles) EXPECT_EQ(handles, 0) << path;
+}
+
+TEST_F(StoreTest, ScheduleAllocationFailureKeepsSavedReviewsAvailableForRetry) {
+  anki::AnkiStore store;
+  ASSERT_TRUE(store.open());
+  ASSERT_TRUE(installSingleDeck(store, 5));
+  ASSERT_TRUE(store.recordReview(0, 1, 10));
+  const auto saved = Storage.files;
+  anki_test_memory::failNextArray = true;
+  EXPECT_FALSE(store.beginReview(1));
+  anki::CardInfo card;
+  EXPECT_FALSE(store.nextReviewCard(card));
+  EXPECT_EQ(store.pendingCount(), 1U);
+  EXPECT_EQ(Storage.files, saved);
+  ASSERT_TRUE(store.open());
+  ASSERT_TRUE(store.beginReview(1));
+  ASSERT_TRUE(nextIs(store, 1));
+}
+
+TEST_F(StoreTest, ReviewInitializationIoFailuresCloseReadersAndRetainRatings) {
+  anki::AnkiStore store;
+  ASSERT_TRUE(store.open());
+  ASSERT_TRUE(installSingleDeck(store, 5));
+  ASSERT_TRUE(store.recordReview(0, 1, 10));
+  const auto saved = Storage.files;
+  bool reachedSuccess = false;
+  for (int failure = 0; failure < 80; ++failure) {
+    SCOPED_TRACE(failure);
+    Storage = {};
+    Storage.files = saved;
+    anki::AnkiStore restarted;
+    ASSERT_TRUE(restarted.open());
+    Storage.failAfter = failure;
+    const bool initialized = restarted.beginReview(1);
+    Storage.failAfter = -1;
+    for (const auto& [path, handles] : Storage.handles) EXPECT_EQ(handles, 0) << path;
+    EXPECT_EQ(Storage.files, saved);
+    EXPECT_EQ(restarted.pendingCount(), 1U);
+    if (initialized) {
+      ASSERT_TRUE(nextIs(restarted, 1));
+      reachedSuccess = true;
+      break;
+    }
+    EXPECT_TRUE(restarted.failed());
+    ASSERT_TRUE(restarted.open());
+    ASSERT_TRUE(restarted.beginReview(1));
+    ASSERT_TRUE(nextIs(restarted, 1));
+  }
+  EXPECT_TRUE(reachedSuccess);
+}
+
+TEST_F(StoreTest, InvalidOrUncertainReviewSessionsCannotSelectCards) {
+  anki::AnkiStore store;
+  ASSERT_TRUE(store.open());
+  EXPECT_FALSE(store.beginReview(1));
+  ASSERT_TRUE(installSingleDeck(store, 2));
+  EXPECT_FALSE(store.beginReview(0));
+  EXPECT_FALSE(store.beginReview(99));
+  anki::CardInfo card;
+  EXPECT_FALSE(store.nextReviewCard(card));
+  ASSERT_TRUE(store.open());
+  ASSERT_TRUE(store.beginReview(1));
+  ASSERT_TRUE(store.recordReview(0, 1, 10));
+  anki::UploadBatch batch;
+  ASSERT_TRUE(store.prepareUpload(batch));
+  ASSERT_TRUE(store.markUploadAttempted(batch.batchId));
+  EXPECT_FALSE(store.beginReview(1));
+  EXPECT_FALSE(store.nextReviewCard(card));
 }
 }  // namespace
