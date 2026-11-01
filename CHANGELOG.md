@@ -7,6 +7,10 @@
 - Repeat completed Anki decks offline from the deck list or completion screen. Repeat progress survives restarts, and every pass's ratings are included in the next sync.
 - Show the downloaded card count beneath each Anki deck name.
 
+### Changed
+
+- Remove on-screen Anki page buttons to give cards more reading space; long questions and answers still page with swipes or physical buttons.
+
 ### Fixed
 
 - Wrap Anki completion, error, empty-library, and sync messages within the screen, keeping nearby controls clear at both UI sizes.

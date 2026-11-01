@@ -21,8 +21,6 @@
 namespace fui = freeink::ui;
 namespace {
 constexpr fui::ActionId kAction = 1;
-constexpr int kPrevious = 0;
-constexpr int kNext = 1;
 constexpr int kReveal = 2;
 constexpr int kAgain = 3;
 constexpr int kGood = 5;
@@ -96,8 +94,6 @@ void AnkiReviewActivity::loadSide() {
 
 bool AnkiReviewActivity::actionEnabled(const int action) const {
   if (done) return action == kRepeat;
-  if (action == kPrevious) return pageNumber > 0;
-  if (action == kNext) return page.hasMore;
   return answer ? action >= kAgain && action <= kLastAction : action == kReveal;
 }
 
@@ -166,8 +162,6 @@ void AnkiReviewActivity::activateAction(const int action) {
       loadNextCard(0);
     }
     requestUpdate();
-  } else if (action == kPrevious || action == kNext) {
-    changePage(action == kNext);
   } else if (action == kReveal) {
     answer = true;
     selectingRating = false;
@@ -279,9 +273,8 @@ void AnkiReviewActivity::drawCard(UiApp::ScreenType& screen) {
   const int buttonHeight = std::max(44, static_cast<int>(screen.theme().rowHeight));
   const int gap = std::max(4, static_cast<int>(screen.theme().spaceSm));
   const int ratingsY = footerBottom - buttonHeight;
-  const int pagingY = ratingsY - gap - buttonHeight;
   const int lineHeight = std::max(1, renderer.getLineHeight(uiScaleSpec().bodyFontId));
-  const int availableHeight = std::max(lineHeight, pagingY - headerBottom - gap);
+  const int availableHeight = std::max(lineHeight, ratingsY - headerBottom - gap);
   if (textWidth != width || textHeight != availableHeight || textFontId != uiScaleSpec().bodyFontId) {
     textWidth = width;
     textHeight = availableHeight;
@@ -301,15 +294,6 @@ void AnkiReviewActivity::drawCard(UiApp::ScreenType& screen) {
   }
   renderer.endTextClip();
 
-  const int halfWidth = (width - gap) / 2;
-  drawAction(screen,
-             fui::Rect{static_cast<int16_t>(x), static_cast<int16_t>(pagingY), static_cast<int16_t>(halfWidth),
-                       static_cast<int16_t>(buttonHeight)},
-             kPrevious, tr(STR_PREV_PAGE));
-  drawAction(screen,
-             fui::Rect{static_cast<int16_t>(x + halfWidth + gap), static_cast<int16_t>(pagingY),
-                       static_cast<int16_t>(width - halfWidth - gap), static_cast<int16_t>(buttonHeight)},
-             kNext, tr(STR_NEXT_PAGE));
   if (!answer) {
     drawAction(screen,
                fui::Rect{static_cast<int16_t>(x), static_cast<int16_t>(ratingsY), static_cast<int16_t>(width),
