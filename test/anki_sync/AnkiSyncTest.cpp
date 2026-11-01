@@ -20,6 +20,7 @@ std::vector<std::string> calls;
 std::vector<std::string> batches;
 std::vector<size_t> batchSizes;
 std::vector<int64_t> uploadedCards;
+std::vector<uint8_t> uploadedRatings;
 
 constexpr char HEALTH[] = R"({"status":"ok","protocol_version":3,"collection_ready":true,"server_time":1790000000})";
 const anki::Connection CONNECTION{"http://desktop:5050", "secret"};
@@ -44,6 +45,7 @@ class SyncTest : public ::testing::Test {
     batches.clear();
     batchSizes.clear();
     uploadedCards.clear();
+    uploadedRatings.clear();
     ASSERT_TRUE(store.open());
     ASSERT_TRUE(client.initialize(store));
   }
@@ -86,8 +88,10 @@ HttpDownloader::DownloadError HttpDownloader::requestToken(const std::string& ur
     const std::string id = payload["batch_id"] | "";
     batches.push_back(id);
     batchSizes.push_back(payload["reviews"].size());
-    for (const auto review : payload["reviews"].as<JsonArray>())
+    for (const auto review : payload["reviews"].as<JsonArray>()) {
       uploadedCards.push_back(review["card_id"].as<int64_t>());
+      uploadedRatings.push_back(review["ease"].as<uint8_t>());
+    }
     if (reply.body == "success" || reply.body == "partial" || reply.body == "duplicate") {
       const auto count = payload["reviews"].size();
       const auto processed = reply.body == "success" ? count : reply.body == "partial" ? count - 1 : 0;
@@ -176,6 +180,29 @@ TEST_F(SyncTest, RepeatedPassesReachDesktopInOrderAcrossBatchBoundaries) {
   EXPECT_EQ(store.cardCount(), 0);
 }
 
+TEST_F(SyncTest, LearningRetriesReachDesktopInOrderAcrossBatchBoundaries) {
+  install(20);
+  // Preserve every failed answer, including a rating change, rather than
+  // uploading only the eventual successful answer for each card.
+  for (uint16_t i = 0; i < 20; ++i) ASSERT_TRUE(store.recordReview(i, i % 2 + 1, 100 + i));
+  for (uint16_t i = 0; i < 20; ++i) ASSERT_TRUE(store.recordReview(i, 2 - i % 2, 200 + i));
+  for (uint16_t i = 0; i < 20; ++i) ASSERT_TRUE(store.recordReview(i, i % 2 + 3, 300 + i));
+  ASSERT_TRUE(store.open());
+  replies = {{"/health", HEALTH},
+             {"/push", "success"},
+             {"/push", "success"},
+             {"/pull?max_cards=250&max_total=1000", snapshot("new", 0)}};
+  EXPECT_EQ(client.run(CONNECTION), anki::SyncResult::Success);
+  EXPECT_EQ(batchSizes, (std::vector<size_t>{32, 28}));
+  ASSERT_EQ(uploadedCards.size(), size_t{60});
+  ASSERT_EQ(uploadedRatings.size(), size_t{60});
+  for (uint16_t i = 0; i < 60; ++i) {
+    EXPECT_EQ(uploadedCards[i], 100 + i % 20);
+    EXPECT_EQ(uploadedRatings[i], i < 20 ? i % 2 + 1 : i < 40 ? 2 - i % 2 : i % 2 + 3);
+  }
+  EXPECT_EQ(store.pendingCount(), 0U);
+}
+
 TEST_F(SyncTest, LostPushResponseRetainsReviewsAndNeverAutomaticallyRetries) {
   queueReview();
   replies = {{"/health", HEALTH}, {"/push", "", HttpDownloader::HTTP_ERROR}};
@@ -242,6 +269,39 @@ TEST_F(SyncTest, TruncatedPullAfterAcknowledgmentKeepsReviewedCardHidden) {
   EXPECT_STREQ(store.generation(), "old");
   anki::CardInfo next;
   EXPECT_FALSE(store.nextUnreviewed(1, 0, next));
+}
+
+TEST_F(SyncTest, TruncatedPullAfterAcknowledgmentPreservesLearningQueueOnRestart) {
+  install(4);
+  ASSERT_TRUE(store.beginReview(1));
+  ASSERT_TRUE(store.recordReview(0, 1, 100));
+  ASSERT_TRUE(store.recordReview(1, 2, 200));
+  ASSERT_TRUE(store.recordReview(2, 3, 300));
+  anki::CardInfo next;
+  ASSERT_TRUE(store.nextReviewCard(next));
+  ASSERT_EQ(next.ordinal, 0);
+  auto incomplete = snapshot("new");
+  incomplete.erase(incomplete.find("{\"type\":\"end\""));
+  replies = {{"/health", HEALTH}, {"/push", "success"}, {"/pull?max_cards=250&max_total=1000", incomplete}};
+  EXPECT_EQ(client.run(CONNECTION), anki::SyncResult::ProtocolError);
+  ASSERT_TRUE(store.open());
+  EXPECT_EQ(store.pendingCount(), 0U);
+  EXPECT_STREQ(store.generation(), "old");
+  ASSERT_TRUE(store.beginReview(1));
+  ASSERT_TRUE(store.nextReviewCard(next));
+  EXPECT_EQ(next.ordinal, 0);
+  anki::Deck deck;
+  ASSERT_TRUE(store.readDeck(0, deck));
+  EXPECT_EQ(deck.remaining, 3);
+  ASSERT_TRUE(store.recordReview(0, 4, 400));
+  ASSERT_TRUE(store.nextReviewCard(next));
+  EXPECT_EQ(next.ordinal, 3);
+  ASSERT_TRUE(store.recordReview(3, 3, 500));
+  ASSERT_TRUE(store.nextReviewCard(next));
+  EXPECT_EQ(next.ordinal, 1);
+  EXPECT_EQ(uploadedCards, (std::vector<int64_t>{100, 101, 102}));
+  EXPECT_EQ(uploadedRatings, (std::vector<uint8_t>{1, 2, 3}));
+  EXPECT_EQ(store.pendingCount(), 2U);
 }
 
 TEST_F(SyncTest, ChecksDesktopProtocolBeforeAttemptingUpload) {

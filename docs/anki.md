@@ -7,7 +7,7 @@ Again and Hard keep a card in the local review queue; Good and Easy complete it.
 Completed decks can be repeated offline, and every saved rating is uploaded in
 order. Anki Desktop owns long-term scheduling; reconnect to obtain the next batch.
 The existing desktop add-on needs no changes. Text, line breaks and basic bold
-are supported. Images, audio, HTML templates, timed learning steps, FSRS and
+are supported. Images, audio, HTML templates, timed learning steps, local FSRS and
 discovery are outside this release.
 
 | Rating | Local effect |
@@ -221,25 +221,33 @@ heap/PSRAM/stack margins still need the acceptance checks below.
 
 ## Validation and release acceptance
 
-The automated results below are historical checks of the previous one-rating
-per-card behavior. They do not establish correctness of the learning queue.
+### Learning queue regression results (2026-11-01)
 
-### Learning queue acceptance (pending)
+- All 1,036 native CTest cases pass, including 128 Anki cases. The 128 also pass
+  AddressSanitizer and UndefinedBehaviorSanitizer with leak detection disabled.
+- Twenty-two new storage cases cover two/five-answer spacing, alternation,
+  earliest-due and ordinal ties, rating changes, small decks, deck independence,
+  deterministic resume, legacy versions 1/2, interrupted upgrades, torn events,
+  failed writes, allocation failure and immutable prepared uploads.
+- Sync tests verify 60 ordered retry ratings across 32/28-review batches and
+  preserved queue order after an acknowledged upload followed by a failed pull.
+- Protocols 2 and 3 pass review/restart/repeat/sync in English/small and
+  German/large. Each run uploads all 16 original/retry/repeated grades once,
+  in immutable batches of 5 and 11, then installs an empty next batch.
+- The broad EPUB simulator smoke test passes with Anki enabled. Native allocation
+  instrumentation verifies a single 4,000-byte array for 1,000 cards, reused
+  through selection and grading. Fixed store fields and allocator overhead are
+  additional; physical-device heap and stack margins remain unmeasured.
+- Scoped Anki cppcheck reports no low, medium or high defects. X4 Pro firmware,
+  X4 Pro simulator, default C3 and Sticky builds pass. C3 and Sticky ELFs contain
+  no Anki implementation symbols.
+- The X4 Pro image is 5,648,592 bytes, an increase of 1,200 bytes from the previous
+  5,647,392-byte image, leaving 905,008 bytes in its OTA partition. Static internal
+  RAM remains 104,500 bytes; the ELF section totals confirm the unchanged static
+  allocation. These figures do not measure runtime heap/PSRAM or task-stack margins.
 
-- Run native coverage for Again/Hard gaps, alternation, earliest-due selection
-  across ratings, original-order ties, rating changes, small decks and completion.
-  Confirm that failed writes do not advance the queue and other decks do not
-  advance its answer counter.
-- Check identical next-card selection after leaving, sleeping and restarting;
-  include completed-card history, legacy version 1/2 journals, version 2 restart
-  events, torn events and interrupted version 3 upgrades. Inject allocation and
-  storage failures without discarding saved ratings.
-- Exercise protocols 2 and 3 with repeated ratings across upload batch boundaries,
-  immutable prepared uploads, acknowledgments that preserve retries, successful
-  next-batch replacement and failed downloads that retain progress.
-- Run scoped Anki static analysis, both protocol simulator flows, the broad
-  simulator smoke and X4 Pro, X4 Pro simulator, C3 and Sticky builds. Record new
-  image sizes and runtime memory separately from historical measurements below.
+The earlier automated results below describe the previous one-rating-per-card
+implementation and its resource baseline.
 
 ### Automated results (2026-10-31)
 
@@ -361,8 +369,8 @@ No physical-device or live Anki Desktop results are claimed. Before release:
    restart, then resume and finish. Open the completed deck from the list and
    repeat using touch. Sync and inspect Desktop's review history: every pass's
    ratings, including every Again/Hard retry, must appear in order. Confirm that
-   the new downloaded batch replaces the local queue. Release a Confirm held during the last touch
-   rating; it must leave the completion screen visible.
+   the new downloaded batch replaces the local queue. Release a Confirm held
+   during the last touch rating; it must leave the completion screen visible.
 2. Interrupt power during journal writes and snapshot activation. Exercise SD
    full/removal, cancelled downloads and desktop timeout/crash. Accepted local
    ratings must survive; failed writes must keep the current card ungraded;
