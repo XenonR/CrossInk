@@ -175,9 +175,6 @@ void AnkiHomeActivity::row(void* context, const uint16_t index, fui::ListItem& i
     item.label = self->rowDeck.name;
     snprintf(self->rowValue, sizeof(self->rowValue), "%u/%u", self->rowDeck.remaining, self->rowDeck.cardCount);
     item.value = self->rowValue;
-    const bool canRepeat = self->rowDeck.remaining == 0 && self->rowDeck.cardCount > 0 && !self->storageError &&
-                           !self->store.needsAttention();
-    if (canRepeat) item.subtitle = tr(STR_ANKI_REPEAT_DECK);
     item.enabled = self->rowDeck.cardCount > 0 && !self->store.needsAttention();
   } else {
     item.label = tr(STR_ANKI_STORAGE_ERROR);

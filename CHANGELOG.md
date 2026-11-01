@@ -8,6 +8,7 @@
 
 ### Changed
 
+- Remove the "Repeat deck" subtitle from completed Anki decks; select a deck to see the repeat option.
 - Remove redundant Anki card-count subtitles; deck totals remain in the existing progress counter.
 - Remove on-screen Anki page buttons to give cards more reading space; long questions and answers still page with swipes or physical buttons.
 
