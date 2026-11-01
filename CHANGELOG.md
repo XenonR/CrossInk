@@ -13,6 +13,7 @@
 
 ### Fixed
 
+- Restore X4 Pro firmware and simulator builds after the Anki deck-label update.
 - Show a single Anki deck subtitle: "N cards", or "Repeat N cards" when repeating is available.
 - Wrap Anki completion, error, empty-library, and sync messages within the screen, keeping nearby controls clear at both UI sizes.
 

@@ -178,7 +178,7 @@ void AnkiHomeActivity::row(void* context, const uint16_t index, fui::ListItem& i
     const bool canRepeat = self->rowDeck.remaining == 0 && self->rowDeck.cardCount > 0 && !self->storageError &&
                            !self->store.needsAttention();
     snprintf(self->rowSubtitle, sizeof(self->rowSubtitle),
-             tr(canRepeat ? STR_ANKI_REPEAT_CARDS_FORMAT : STR_ANKI_CARDS_FORMAT),
+             canRepeat ? tr(STR_ANKI_REPEAT_CARDS_FORMAT) : tr(STR_ANKI_CARDS_FORMAT),
              static_cast<unsigned>(self->rowDeck.cardCount));
     item.subtitle = self->rowSubtitle;
     item.enabled = self->rowDeck.cardCount > 0 && !self->store.needsAttention();

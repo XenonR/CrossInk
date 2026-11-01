@@ -42,5 +42,6 @@ Refer to https://freeink.org/llms.txt for guidance.
 
 ## Misc Repo Gotchas
 
+- `tr(id)` is a macro that prefixes `StrId::`; pass a single `STR_*` key and select between calls, e.g. `condition ? tr(STR_A) : tr(STR_B)`.
 - POSIX TZ signs are inverted from ISO 8601 in `TimeStore::applyTimezone()`: `"UTC-1"` means UTC+1.
 - `LyraTheme::drawHeader()` does not call `BaseTheme::drawHeader()`, so header changes in the base theme must be duplicated in Lyra if needed.
