@@ -175,7 +175,12 @@ void AnkiHomeActivity::row(void* context, const uint16_t index, fui::ListItem& i
     item.label = self->rowDeck.name;
     snprintf(self->rowValue, sizeof(self->rowValue), "%u/%u", self->rowDeck.remaining, self->rowDeck.cardCount);
     item.value = self->rowValue;
-    if (self->rowDeck.remaining == 0) item.subtitle = tr(STR_ANKI_REPEAT_DECK);
+    const int length = snprintf(self->rowSubtitle, sizeof(self->rowSubtitle), tr(STR_ANKI_CARDS_FORMAT),
+                                static_cast<unsigned>(self->rowDeck.cardCount));
+    if (self->rowDeck.remaining == 0 && length >= 0 && static_cast<size_t>(length) < sizeof(self->rowSubtitle)) {
+      snprintf(self->rowSubtitle + length, sizeof(self->rowSubtitle) - length, "\n%s", tr(STR_ANKI_REPEAT_DECK));
+    }
+    item.subtitle = self->rowSubtitle;
     item.enabled = self->rowDeck.cardCount > 0 && !self->store.needsAttention();
   } else {
     item.label = tr(STR_ANKI_STORAGE_ERROR);

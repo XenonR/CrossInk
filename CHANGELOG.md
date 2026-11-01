@@ -5,6 +5,7 @@
 - Review downloaded Anki text cards offline on X4 Pro, with paged questions and answers, basic bold text, touch and physical controls, and SD-persisted ratings.
 - Manually synchronize due-card batches and reviews with the existing Xteink-Anki desktop add-on (protocols 2 and 3). Downloads preserve the previous batch on failure; uncertain review uploads remain on SD with a recovery report for checking in Anki Desktop.
 - Repeat completed Anki decks offline from the deck list or completion screen. Repeat progress survives restarts, and every pass's ratings are included in the next sync.
+- Show the downloaded card count beneath each Anki deck name.
 
 ### Fixed
 
