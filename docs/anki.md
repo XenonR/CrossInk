@@ -133,6 +133,29 @@ completion, bounds and redirect behavior are additionally tested against the
 production HTTP wrapper with native ESP transport stubs. These checks do not
 replace testing the unmodified add-ons on a physical device.
 
+### Offline repeat regression results (2026-11-01)
+
+- All 997 native CTest cases pass, including 89 Anki cases. The 42 storage/sync
+  cases also pass AddressSanitizer and UndefinedBehaviorSanitizer with leak
+  detection disabled.
+- Repeat tests cover independent decks, partial-pass resume, immutable prepared
+  uploads, version 1 upgrades at every storage checkpoint, torn/corrupt restart
+  events, failed writes and 65,536 pending reviews. Sequential upload reads are
+  checked against a bounded total byte count.
+- Protocols 2 and 3 pass the simulator's review/restart/repeat/sync phases in
+  English and German at both UI sizes. Each run uploads five original and five
+  repeated ratings in order, once each, across two immutable batches. The test
+  exercises both repeat entry points and the held-Confirm release guard.
+- Completion captures fit in all four orientations for English/small and
+  German/large. The broad EPUB simulator smoke and scoped Anki cppcheck pass.
+- X4 Pro firmware/simulator, default C3 and Sticky builds pass. C3 and Sticky
+  firmware contain no Anki implementation symbols. The X4 Pro image is
+  5,643,856 bytes, leaving 909,744 bytes in its OTA partition; reported static
+  RAM remains 104,500 bytes. These figures do not measure runtime heap margins.
+
+Physical-device scheduling, SD power-loss behavior and resource margins remain
+subject to the hardware acceptance steps below.
+
 Run the normal build and smoke entry points from the repository root:
 
 ```sh
