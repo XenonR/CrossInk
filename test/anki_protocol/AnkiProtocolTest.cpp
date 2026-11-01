@@ -107,6 +107,25 @@ TEST(AnkiProtocol, RejectsTruncationBadCountsAndTrailingRecords) {
   }
 }
 
+TEST(AnkiProtocol, RejectsEmbeddedNullSuffixesInRecordTypesAndStatuses) {
+  for (const auto& input :
+       {std::string(
+            R"({"type":"meta\u0000junk","status":"success","protocol_version":3,"pull_id":"g","card_count":0})") +
+            '\n' + end(0),
+        std::string(
+            R"({"type":"meta","status":"success\u0000junk","protocol_version":3,"pull_id":"g","card_count":0})") +
+            '\n' + end(0),
+        metadata(1) + R"({"type":"card\u0000junk","id":1,"deck_id":1,"deck_name":"D","front":"Q","back":"A"})" + '\n' +
+            end(1),
+        metadata(0) + R"({"type":"end\u0000junk","card_count":0})" + '\n'}) {
+    Capture capture;
+    PullDecoder decoder;
+    ASSERT_TRUE(decoder.initialize(capture.callbacks()));
+    EXPECT_FALSE(feed(decoder, input) && decoder.finish());
+    EXPECT_FALSE(capture.ended);
+  }
+}
+
 TEST(AnkiProtocol, RejectsOversizedAndInvalidUtf8SidesWithoutCommitting) {
   for (const auto& front : {std::string(MAX_SIDE_BYTES + 1, 'x'), std::string("before\0after", 12),
                             std::string("\xc0\xaf", 2), std::string("\xed\xa0\x80", 3)}) {
@@ -186,6 +205,15 @@ TEST(AnkiProtocol, ParsesHealthWithoutAssumingCollectionReady) {
   EXPECT_EQ(health.serverTime, uint64_t{1790000000});
 }
 
+TEST(AnkiProtocol, RejectsEmbeddedNullSuffixInHealthStatus) {
+  PullDecoder decoder;
+  ASSERT_TRUE(decoder.initialize());
+  Health health;
+  const std::string input =
+      R"({"status":"ok\u0000junk","protocol_version":3,"collection_ready":true,"server_time":1790000000})";
+  EXPECT_FALSE(decoder.parseHealth(input.data(), input.size(), health));
+}
+
 TEST(AnkiProtocol, DistinguishesAcknowledgedPartialAndAmbiguousDuplicateReceipts) {
   PullDecoder decoder;
   ASSERT_TRUE(decoder.initialize());
@@ -225,6 +253,20 @@ TEST(AnkiProtocol, RejectsReceiptsForOtherBatchesMissingReviewsOrDuplicateReject
   }
 }
 
+TEST(AnkiProtocol, RejectsEmbeddedNullSuffixesInReceiptStatusesAndItemTypes) {
+  for (
+      const char* input :
+      {R"({"protocol_version":3,"batch_id":"batch-1","status":"success\u0000junk","processed":2,"rejected":[]})",
+       R"({"protocol_version":3,"batch_id":"batch-1","status":"partial\u0000junk","processed":1,"rejected":[{"index":0}]})",
+       R"({"protocol_version":3,"batch_id":"batch-1","status":"duplicate\u0000junk","processed":0,"rejected":[]})",
+       R"({"protocol_version":3,"batch_id":"batch-1","status":"partial","processed":1,"rejected":[{"index":0,"kind":"review\u0000junk"}]})"}) {
+    PullDecoder decoder;
+    ASSERT_TRUE(decoder.initialize());
+    PushReceipt receipt;
+    EXPECT_FALSE(decoder.parsePushReceipt(input, strlen(input), "batch-1", 2, receipt));
+  }
+}
+
 TEST(AnkiProtocol, SerializesOrderedReviewsWithOptionalTimestampAndEscapedBatchId) {
   UploadBatch batch;
   strcpy(batch.batchId, "batch-\"\\1");
@@ -244,5 +286,19 @@ TEST(AnkiProtocol, SerializesOrderedReviewsWithOptionalTimestampAndEscapedBatchI
   EXPECT_EQ(serializePush(batch, output.data(), 20), size_t{0});
   batch.reviews[0].ease = 0;
   EXPECT_EQ(serializePush(batch, output.data(), output.size()), size_t{0});
+}
+
+TEST(AnkiProtocol, MaximumUploadFitsFourKiBIncludingWorstCaseEscapedBatchId) {
+  UploadBatch batch;
+  memset(batch.batchId, '\\', MAX_BATCH_ID_BYTES);
+  batch.count = MAX_UPLOAD_REVIEWS;
+  for (auto& review : batch.reviews) review = {UINT32_MAX, UINT16_MAX, INT64_MAX, 4, 3600000, 9999999999999ULL};
+  std::string output(4096, '\0');
+  const size_t length = serializePush(batch, output.data(), output.size());
+  ASSERT_GT(length, size_t{0});
+  JsonDocument document;
+  ASSERT_FALSE(deserializeJson(document, output.data(), length));
+  EXPECT_EQ(document["reviews"].size(), size_t{MAX_UPLOAD_REVIEWS});
+  EXPECT_EQ(document["batch_id"].as<std::string>(), batch.batchId);
 }
 }  // namespace

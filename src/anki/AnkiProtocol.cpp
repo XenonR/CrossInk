@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <string_view>
 
 namespace anki {
 namespace {
@@ -67,6 +68,12 @@ bool stringValue(const JsonVariantConst value, const size_t maximum, JsonString&
   if (!value.is<const char*>()) return false;
   text = value.as<JsonString>();
   return text.size() <= maximum && validUtf8(text.c_str(), text.size());
+}
+
+bool equals(const JsonVariantConst value, const std::string_view expected) {
+  if (!value.is<const char*>()) return false;
+  const JsonString text = value.as<JsonString>();
+  return text.size() == expected.size() && memcmp(text.c_str(), expected.data(), expected.size()) == 0;
 }
 
 bool positiveId(const JsonVariantConst value, int64_t& id) {
@@ -218,10 +225,10 @@ bool PullDecoder::processLine() {
   }
   if (!parseJson(text, lineLength_)) return false;
   lineLength_ = 0;
-  const char* type = document_["type"] | "";
+  const JsonVariantConst type = document_["type"];
   if (state_ == State::Meta) {
     JsonString generation;
-    if (strcmp(type, "meta") || strcmp(document_["status"] | "", "success") ||
+    if (!equals(type, "meta") || !equals(document_["status"], "success") ||
         !supportedVersion(document_["protocol_version"], version_) || !document_["card_count"].is<unsigned>() ||
         document_["card_count"].as<unsigned>() > MAX_CARDS ||
         !stringValue(document_["pull_id"], MAX_GENERATION_BYTES, generation) ||
@@ -236,14 +243,14 @@ bool PullDecoder::processLine() {
     return true;
   }
   if (state_ != State::Cards) return fail("Unexpected record after Anki download end");
-  if (!strcmp(type, "end")) {
+  if (equals(type, "end")) {
     if (!document_["card_count"].is<unsigned>() || document_["card_count"].as<unsigned>() != cardCount_ ||
         cardCount_ != expectedCount_)
       return fail("Anki download card counts do not match");
     state_ = State::Ended;
     return true;
   }
-  if (strcmp(type, "card") || cardCount_ >= expectedCount_) return fail("Unexpected Anki card record");
+  if (!equals(type, "card") || cardCount_ >= expectedCount_) return fail("Unexpected Anki card record");
   CardInput card;
   JsonString deckName, front, back;
   if (!positiveId(document_["id"], card.cardId) || !positiveId(document_["deck_id"], card.deckId) ||
@@ -292,8 +299,7 @@ bool PullDecoder::finish() {
 bool PullDecoder::parseHealth(const char* data, const size_t length, Health& health) {
   health = {};
   if (!parseJson(data, length)) return false;
-  if (strcmp(document_["status"] | "", "ok") ||
-      !supportedVersion(document_["protocol_version"], health.protocolVersion) ||
+  if (!equals(document_["status"], "ok") || !supportedVersion(document_["protocol_version"], health.protocolVersion) ||
       !document_["collection_ready"].is<bool>() || !document_["server_time"].is<uint64_t>())
     return fail("Unsupported or invalid Anki server health response");
   health.collectionReady = document_["collection_ready"].as<bool>();
@@ -324,19 +330,18 @@ bool PullDecoder::parsePushReceipt(const char* data, const size_t length, const 
     const uint32_t bit = uint32_t{1} << entry["index"].as<unsigned>();
     if (seen & bit) return fail("Duplicate Anki rejected review index");
     seen |= bit;
-    if (!entry["kind"].isNull() && strcmp(entry["kind"] | "", "review"))
-      return fail("Unexpected Anki rejected item type");
+    if (!entry["kind"].isNull() && !equals(entry["kind"], "review")) return fail("Unexpected Anki rejected item type");
   }
-  const char* status = document_["status"] | "";
-  if (!strcmp(status, "success") && receipt.processed == expectedCount && receipt.rejected == 0) {
+  const JsonVariantConst status = document_["status"];
+  if (equals(status, "success") && receipt.processed == expectedCount && receipt.rejected == 0) {
     receipt.status = PushReceipt::Status::Success;
     return true;
   }
-  if (!strcmp(status, "partial") && receipt.rejected > 0 && receipt.processed + receipt.rejected == expectedCount) {
+  if (equals(status, "partial") && receipt.rejected > 0 && receipt.processed + receipt.rejected == expectedCount) {
     receipt.status = PushReceipt::Status::Partial;
     return true;
   }
-  if (!strcmp(status, "duplicate") && receipt.processed == 0 && receipt.rejected == 0) {
+  if (equals(status, "duplicate") && receipt.processed == 0 && receipt.rejected == 0) {
     receipt.status = PushReceipt::Status::Duplicate;
     return true;
   }

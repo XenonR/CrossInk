@@ -3,6 +3,7 @@
 #if CROSSINK_APP_CAP_ANKI
 #include <Logging.h>
 #include <Memory.h>
+#include <uzlib.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -43,11 +44,9 @@ void put64(uint8_t* p, uint64_t n) {
   put32(p + 4, n >> 32);
 }
 uint32_t crc32(const uint8_t* p, size_t n, uint32_t crc = 0xffffffffU) {
-  while (n--) {
-    crc ^= *p++;
-    for (int i = 0; i < 8; ++i) crc = (crc >> 1) ^ (0xedb88320U & (0U - (crc & 1U)));
-  }
-  return crc;
+  // Reuse the firmware's nibble-table CRC without changing the on-SD checksum
+  // or this store's unfinalized incremental accumulator.
+  return ~uzlib_crc32(p, static_cast<unsigned>(n), ~crc);
 }
 uint64_t generationHash(const char* generation) {
   uint64_t hash = 14695981039346656037ULL;
@@ -236,12 +235,18 @@ bool AnkiStore::appendCard(const CardInput& card) {
     put16(record + 10, strlen(card.deckName));
     memcpy(record + 12, card.deckName, strlen(card.deckName));
   } else if (!state.file.seek(HEADER_BYTES + state.expected * CARD_BYTES + deck * DECK_BYTES) ||
-             !exactRead(state.file, record, DECK_BYTES))
+             !exactRead(state.file, record, DECK_BYTES)) {
+    LOG_ERR("ANKI", "Cannot read staged deck record");
+    cancelSnapshot();
     return false;
+  }
   put16(record + 8, get16(record + 8) + 1);
   if (!state.file.seek(HEADER_BYTES + state.expected * CARD_BYTES + deck * DECK_BYTES) ||
-      state.file.write(record, DECK_BYTES) != DECK_BYTES)
+      state.file.write(record, DECK_BYTES) != DECK_BYTES) {
+    LOG_ERR("ANKI", "Cannot write staged deck record");
+    cancelSnapshot();
     return false;
+  }
   memset(record, 0, CARD_BYTES);
   put64(record, card.cardId);
   put64(record + 8, card.deckId);
@@ -254,6 +259,9 @@ bool AnkiStore::appendCard(const CardInput& card) {
       !state.file.seek(state.end) || state.file.write(card.front, card.frontLength) != card.frontLength ||
       state.file.write(card.back, card.backLength) != card.backLength) {
     LOG_ERR("ANKI", "Card snapshot write failed");
+    // Deck counts/identity metadata may already have advanced. Discard the
+    // import so retrying this card cannot publish partially updated indexes.
+    cancelSnapshot();
     return false;
   }
   state.end += card.frontLength + card.backLength;
@@ -288,18 +296,30 @@ bool AnkiStore::commitSnapshot() {
   char path[112];
   snprintf(path, sizeof(path), "%s/reviews-%016llx.log", ROOT,
            static_cast<unsigned long long>(generationHash(state.generation)));
-  if (Storage.exists(path)) {
-    LOG_ERR("ANKI", "Generation journal already exists");
-    return false;
-  }
   uint8_t journal[JOURNAL_HEADER_BYTES] = {};
   memcpy(journal, "ANJ1", 4);
   put16(journal + 4, JOURNAL_VERSION);
   journal[6] = strlen(state.generation);
   memcpy(journal + 16, state.generation, strlen(state.generation));
   put32(journal + 92, crc32(journal, 92) ^ 0xffffffffU);
-  auto log = Storage.open(path, O_WRONLY | O_CREAT | O_TRUNC);
-  if (!log || !finishFile(log, log.write(journal, sizeof(journal)) == sizeof(journal))) return false;
+  if (Storage.exists(path)) {
+    // An interrupted activation can leave its empty journal behind.
+    // Reuse only that exact header; never truncate an older generation's
+    // reviews, a hash collision, or damaged evidence to make a retry succeed.
+    auto log = Storage.open(path, O_RDWR);
+    bool reusable = log && log.size() == sizeof(journal) && exactRead(log, header, sizeof(journal)) &&
+                    memcmp(header, journal, sizeof(journal)) == 0;
+    // The earlier attempt may have failed its sync. Verify durability again
+    // before publishing a snapshot that depends on this otherwise empty file.
+    if (log) reusable = finishFile(log, reusable);
+    if (!reusable) {
+      LOG_ERR("ANKI", "Generation journal already contains reviews or invalid data");
+      return false;
+    }
+  } else {
+    auto log = Storage.open(path, O_WRONLY | O_CREAT | O_TRUNC);
+    if (!log || !finishFile(log, log.write(journal, sizeof(journal)) == sizeof(journal))) return false;
+  }
   if (Storage.exists(BACKUP) && !Storage.remove(BACKUP)) return false;
   const bool old = Storage.exists(SNAPSHOT);
   if (old && !Storage.rename(SNAPSHOT, BACKUP)) return false;
@@ -332,6 +352,7 @@ bool AnkiStore::readCard(uint16_t ordinal, CardInfo& out) {
   }
   out = {static_cast<int64_t>(get64(record)), static_cast<int64_t>(get64(record + 8)), ordinal};
   if (out.cardId <= 0 || out.deckId <= 0) {
+    LOG_ERR("ANKI", "Invalid card identity");
     failed_ = true;
     return false;
   }
@@ -362,8 +383,8 @@ bool AnkiStore::readDeck(uint16_t ordinal, Deck& out) {
   uint8_t record[DECK_BYTES];
   bool ok = file && file.seek(HEADER_BYTES + cardCount_ * CARD_BYTES + ordinal * DECK_BYTES) &&
             exactRead(file, record, sizeof(record));
-  if (file) ok = file.close() && ok;
   if (!ok || get16(record + 10) > MAX_DECK_NAME_BYTES) {
+    if (file) file.close();
     LOG_ERR("ANKI", "Invalid deck index");
     failed_ = true;
     return false;
@@ -372,13 +393,16 @@ bool AnkiStore::readDeck(uint16_t ordinal, Deck& out) {
   out.deckId = static_cast<int64_t>(get64(record));
   out.cardCount = get16(record + 8);
   memcpy(out.name, record + 12, get16(record + 10));
-  // Batch the index scan in one handle rather than reopening per card.
-  file = Storage.open(SNAPSHOT, O_RDONLY);
-  ok = file && file.seek(HEADER_BYTES);
-  for (uint16_t i = 0; ok && i < cardCount_; ++i) {
-    ok = exactRead(file, record, CARD_BYTES);
-    if (ok && static_cast<int64_t>(get64(record + 8)) == out.deckId && !(reviewed_[i / 8] & (1U << (i % 8))))
-      ++out.remaining;
+  if (std::all_of(reviewed_.begin(), reviewed_.end(), [](uint8_t bits) { return bits == 0; })) {
+    // A fresh snapshot or restarted pass needs no card-index scan per list row.
+    out.remaining = out.cardCount;
+  } else {
+    ok = file.seek(HEADER_BYTES);
+    for (uint16_t i = 0; ok && i < cardCount_; ++i) {
+      ok = exactRead(file, record, CARD_BYTES);
+      if (ok && static_cast<int64_t>(get64(record + 8)) == out.deckId && !(reviewed_[i / 8] & (1U << (i % 8))))
+        ++out.remaining;
+    }
   }
   if (file) ok = file.close() && ok;
   if (!ok) {
@@ -388,12 +412,35 @@ bool AnkiStore::readDeck(uint16_t ordinal, Deck& out) {
   return ok;
 }
 bool AnkiStore::nextUnreviewed(int64_t deckId, uint16_t start, CardInfo& out) {
-  for (uint16_t i = start; i < cardCount_; ++i) {
+  if (failed_) return false;
+  while (start < cardCount_ && (reviewed_[start / 8] & (1U << (start % 8)))) ++start;
+  if (start >= cardCount_) return false;
+  auto file = Storage.open(SNAPSHOT, O_RDONLY);
+  uint8_t record[CARD_BYTES];
+  bool ok = file && file.seek(HEADER_BYTES + start * CARD_BYTES), found = false;
+  uint16_t nextOrdinal = start;
+  for (uint16_t i = start; ok && i < cardCount_; ++i) {
     if (reviewed_[i / 8] & (1U << (i % 8))) continue;
-    if (!readCard(i, out)) return false;
-    if (out.deckId == deckId) return true;
+    if (i != nextOrdinal) ok = file.seek(HEADER_BYTES + i * CARD_BYTES);
+    ok = ok && exactRead(file, record, sizeof(record));
+    nextOrdinal = i + 1;
+    if (!ok) break;
+    const int64_t cardId = static_cast<int64_t>(get64(record));
+    const int64_t candidateDeckId = static_cast<int64_t>(get64(record + 8));
+    if (cardId <= 0 || candidateDeckId <= 0) {
+      ok = false;
+    } else if (candidateDeckId == deckId) {
+      out = {cardId, candidateDeckId, i};
+      found = true;
+      break;
+    }
   }
-  return false;
+  if (file) ok = file.close() && ok;
+  if (!ok) {
+    LOG_ERR("ANKI", "Cannot scan available cards");
+    failed_ = true;
+  }
+  return ok && found;
 }
 
 bool AnkiStore::completedDeckMask(const int64_t deckId, ReviewedBits& mask) {

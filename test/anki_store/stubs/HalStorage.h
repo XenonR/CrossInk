@@ -15,11 +15,14 @@ struct TestStorage {
   using Files = std::map<std::string, std::vector<uint8_t>>;
   Files files;
   size_t bytesRead = 0;
+  size_t openCalls = 0;
   bool captureCheckpoints = false;
   std::vector<Files> checkpoints;
   std::map<std::string, int> handles;
   int failAfter = -1;
   bool failWrite = false, failSync = false, failClose = false;
+  bool failRename = false;
+  std::string failSyncPath;
   bool operation() {
     if (captureCheckpoints) checkpoints.push_back(files);
     if (failAfter < 0) return true;
@@ -36,7 +39,8 @@ struct TestStorage {
     return files.erase(path) > 0;
   }
   bool rename(const char* from, const char* to) {
-    if (!operation() || !exists(from) || exists(to) || handles[from] || handles[to]) return false;
+    if (!operation() || std::exchange(failRename, false) || !exists(from) || exists(to) || handles[from] || handles[to])
+      return false;
     files[to] = std::move(files[from]);
     files.erase(from);
     return true;
@@ -99,6 +103,10 @@ class HalFile {
     return n;
   }
   bool sync() {
+    if (Storage.failSyncPath == path_) {
+      Storage.failSyncPath.clear();
+      return false;
+    }
     if (std::exchange(Storage.failSync, false)) return false;
     return Storage.operation();
   }
@@ -111,6 +119,7 @@ class HalFile {
   }
 };
 inline HalFile TestStorage::open(const char* path, int flags) {
+  ++openCalls;
   if (!operation() || handles[path]) return {};
   if (!exists(path)) {
     if (!(flags & O_CREAT)) return {};

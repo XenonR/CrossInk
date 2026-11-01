@@ -39,8 +39,10 @@ journal and does not automatically replay uncertain reviews.
 
 Use one Anki collection and avoid reviewing the downloaded cards elsewhere until
 their device reviews have been uploaded. The plugin supplies no collection ID or
-conflict detection. Address/token edits reconnect the same collection; they must
-not redirect pending reviews to another collection.
+conflict detection. Address/token edits reconnect the same collection. Connection
+changes require confirmation while downloaded cards or pending ratings remain;
+reviewing a downloaded card after a connection edit must still send its rating to
+the same collection.
 
 ## Pinned references and compatibility
 
@@ -106,6 +108,81 @@ version 1. Do not clear Anki data to enable repeats.
 FAT rename is not a physical atomicity guarantee. Tests must interrupt each
 activation step; real SD power-cut tests remain a release requirement.
 
+## Source review and resource tradeoffs (2026-11-01)
+
+The review covers the Anki store, protocol decoder, HTTP transaction path,
+connection settings, sync worker, review/deck activities, text layout and their
+tests. Fixes stay within Anki; the SDK, shared persistence and general HTTP
+behavior are unchanged. No scheduler, collection format, settings or dependency
+was added.
+
+The main correctness changes are:
+
+- Protocol control fields now compare complete JSON strings. Previously a value
+  such as `success\u0000junk` matched `success` through a C-string comparison,
+  including in upload acknowledgments. Malformed receipts leave reviews pending
+  for reconciliation.
+- Physical card input waits until the requested screen has rendered. Rapid
+  Confirm releases cannot reveal, select and grade through unseen states. A
+  Confirm held during touch grading also has its release consumed on the next
+  card. Back and error dismissal remain available.
+- Changing the connection with unreviewed downloaded cards now requires the
+  same collection confirmation already used for saved ratings. Those cards
+  retain their original collection ownership even before their first rating.
+- Any staged card/deck I/O failure cancels that import. Retrying an append can
+  no longer publish partially updated deck counts. An activation retry may
+  reuse only a byte-exact, empty matching journal after checked sync/close;
+  nonempty, mismatched or damaged journals remain untouched.
+- Configuration is read once after checking its size, using a fallible buffer
+  of at most 2,048 bytes. Parsing rejects trailing records and literal NULs;
+  backup recovery validates the file before restoring it. Failed initialization
+  leaves the sync client unavailable, and rejected download data is distinguished
+  from a failed HTTP connection.
+
+| Change | Device work / RAM | SD and firmware storage |
+| --- | --- | --- |
+| Upload body workspace | 8,192 → 4,096 bytes, explicitly in PSRAM; the maximum supported encoded body is 3,227 bytes | Same request and journal bytes |
+| Fresh deck-list row, 1,000 cards | One file open and 256 bytes read, previously two opens and 40,256 bytes read | Uses the existing directory and 125-byte reviewed bitmap; no new index |
+| Next-card search | One open for the scan, previously up to 1,000; reviewed index entries remain skipped | Same 40-byte card records and bounded read volume; no retained card list |
+| Rating-focus and tap redraws | Reuse existing page/line offsets; one validity boolean, no new heap | No page index or SD writes; e-ink painting still occurs |
+| Snapshot and journal CRC | Reuse the existing uzlib CRC, with two nibble steps instead of eight bit steps per byte | Identical CRC32 and binary formats; reuse the firmware's existing constant table |
+| Connection load | One open/read/close; at most 2 KiB of input off the task stack | Same version 1 JSON and backup names |
+
+These are allocation bounds and operation counts, not measured hardware latency
+or battery improvements. Native tests assert the read/open bounds and verify
+the unchanged CRC bytes across transfer-block boundaries. Review duration and
+SD sync costs still depend on the card and real device.
+
+The X4 Pro prebuilt SDK uses `CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096` and
+prefers internal RAM for allocations at or below that limit. Shrinking an
+ordinary allocation to exactly 4 KiB would therefore increase internal-RAM
+pressure. The upload buffer explicitly uses PSRAM, like the parser workspaces;
+failure is checked instead of silently falling back to internal RAM. It is
+serialized once per upload batch, rather than used in the review render path.
+
+The snapshot deliberately reserves a 256-byte deck slot per downloaded card.
+Its size remains `128 + 296 * card_count + front/back UTF-8 bytes`. The journal
+retains 64-byte events after its 96-byte header; ratings, repeat markers and
+upload transitions keep their existing write/sync/close guarantees. Old journals,
+backups and recovery reports remain as evidence. No compaction or format
+migration is introduced to save space at the expense of recovery complexity.
+
+Backward paging still rebuilds preceding pages instead of allocating a page
+history. Contextual text measurement is retained for kerning and shaping.
+The 512 KiB line buffer and 128 KiB JSON arena remain in PSRAM, since shrinking
+them could reject supported Unicode deck metadata. No second framebuffer is
+allocated. Anki stays disabled on the C3 and Sticky environments.
+
+Remaining boundaries are explicit: the desktop add-on cannot prove collection
+identity or exactly-once application after a lost receipt, so uncertain uploads
+still require manual reconciliation. Cancellation is checked between synchronous
+HTTP operations; a stalled operation can wait for its 75-second network timeout.
+Connection saves still use the shared JSON persistence helper; its Arduino
+`String` serialization does not explicitly check allocation failure, and that
+shared implementation is outside this Anki-only change. Transient import failures
+can share the generic rejected-download result. Physical SD durability and runtime
+heap/PSRAM/stack margins still need the acceptance checks below.
+
 ## Validation and release acceptance
 
 ### Automated results (2026-10-31)
@@ -156,6 +233,26 @@ replace testing the unmodified add-ons on a physical device.
 Physical-device scheduling, SD power-loss behavior and resource margins remain
 subject to the hardware acceptance steps below.
 
+### Source review regression results (2026-11-01)
+
+- All 1,012 native CTest cases pass, including 104 Anki cases. The 104 also pass
+  AddressSanitizer and UndefinedBehaviorSanitizer with leak detection disabled.
+  Fifteen additional native cases cover malformed control strings/configuration,
+  staging failures at 16 I/O boundaries, activation retry/re-sync, preserved
+  journal evidence, bounded SD operations and the unchanged cross-block CRC.
+- Protocols 2 and 3 pass review/restart/repeat/sync in English and German at both
+  UI sizes. The final simulator flow checks cached-card connection confirmation
+  with zero pending reviews, cancellation preserving credentials, rapid Confirm
+  bursts, held Confirm during touch grading, and pagination reuse/invalidation.
+  Every run uploads the original and repeated ratings once, in order.
+- English/small and German/large confirmation captures fit in portrait and
+  landscape. The existing broad EPUB smoke test passes with Anki enabled.
+- Scoped Anki PlatformIO cppcheck reports no low, medium or high defects.
+- X4 Pro firmware/simulator, default C3 and Sticky builds pass. C3 and Sticky
+  ELFs contain no Anki implementation symbols. The X4 Pro image is 5,647,392
+  bytes, leaving 906,208 bytes in its OTA partition; reported static RAM remains
+  104,500 bytes. Runtime heap/PSRAM margins and hardware latency were not measured.
+
 Run the normal build and smoke entry points from the repository root:
 
 ```sh
@@ -194,6 +291,10 @@ No physical-device or live Anki Desktop results are claimed. Before release:
 1. Test each pinned, unmodified add-on with **Home → Anki → Connection → Sync**.
    Confirm the intended collection, download, disconnect Wi-Fi, review all four
    ratings, sleep/restart, reconnect and inspect the actual desktop ratings.
+   Before the first rating, edit the connection and cancel the collection
+   confirmation: the original address/token must remain. Rapid Confirm presses
+   must wait for each new screen. Hold Confirm while touch-grading a nonfinal
+   card, then release it: the next question must remain unrevealed.
    Complete a deck and repeat it using physical Confirm, leave midway, sleep or
    restart, then resume and finish. Open the completed deck from the list and
    repeat using touch. Sync and inspect Desktop's review history: every pass's

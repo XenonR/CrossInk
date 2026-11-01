@@ -34,6 +34,8 @@ class AnkiSyncActivity final : public Activity {
     anki::SyncResult outcome;
   };
   SimulatorState simulatorState() const { return {running.load(), hasOutcome, configureOnly, outcome.load()}; }
+  // Exercise the real credential-save flow without keyboard input plumbing.
+  void simulatorSaveConnection(const anki::Connection& candidate) { saveConnection(candidate); }
 #endif
 
  private:

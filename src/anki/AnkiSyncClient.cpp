@@ -11,13 +11,21 @@
 
 namespace anki {
 bool AnkiSyncClient::initialize(AnkiStore& store) {
-  store_ = &store;
-  // Buffers are activity-owned and reused across batches; keeping ~26 KiB off
+  store_ = nullptr;
+  // Buffers are activity-owned and reused across batches; keeping ~22 KiB off
   // the small network-task stack also avoids per-response allocation churn.
-  decoder_ = makeUniqueNoThrow<PullDecoder>();
-  batch_ = makeUniqueNoThrow<UploadBatch>();
-  body_ = makeUniqueNoThrow<char[]>(BODY_BYTES);
-  response_ = makeUniqueNoThrow<char[]>(RESPONSE_BYTES);
+  if (!decoder_) decoder_ = makeUniqueNoThrow<PullDecoder>();
+  if (!batch_) batch_ = makeUniqueNoThrow<UploadBatch>();
+  if (!body_) {
+    // This 4 KiB request buffer cannot fit on the worker stack. Keep it in
+    // PSRAM: X4 Pro's default allocator prefers internal RAM at <= 4 KiB.
+#if defined(ARDUINO_ARCH_ESP32) && !defined(SIMULATOR)
+    body_ = makePsramByteBufferNoThrow(BODY_BYTES);
+#else
+    body_ = makeHeapByteBufferNoThrow(BODY_BYTES);
+#endif
+  }
+  if (!response_) response_ = makeUniqueNoThrow<char[]>(RESPONSE_BYTES);
   if (!decoder_ || !batch_ || !body_ || !response_) {
     LOG_ERR("ANKI", "Cannot allocate sync workspace");
     return false;
@@ -31,7 +39,9 @@ bool AnkiSyncClient::initialize(AnkiStore& store) {
   };
   // Publication waits until both HTTP completion and decoder finish succeed.
   pullCallbacks_.onEnd = [](void*) { return true; };
-  return decoder_->initialize(pullCallbacks_);
+  if (!decoder_->initialize(pullCallbacks_)) return false;
+  store_ = &store;
+  return true;
 }
 
 SyncResult AnkiSyncClient::run(const Connection& connection, const SyncCallbacks callbacks) {
@@ -39,6 +49,7 @@ SyncResult AnkiSyncClient::run(const Connection& connection, const SyncCallbacks
   if (!connection.configured()) return SyncResult::NotConfigured;
   if (store_->failed()) return SyncResult::StorageError;
   if (store_->needsAttention()) return SyncResult::Attention;
+  auto* const body = reinterpret_cast<char*>(body_.get());
   const auto cancelled = [&]() { return callbacks.cancelled && callbacks.cancelled(callbacks.context); };
   const auto phase = [&](const SyncPhase value) {
     if (callbacks.phaseChanged) callbacks.phaseChanged(callbacks.context, value);
@@ -66,7 +77,7 @@ SyncResult AnkiSyncClient::run(const Connection& connection, const SyncCallbacks
   while (store_->pendingCount() != 0) {
     if (cancelled()) return SyncResult::Cancelled;
     if (!store_->prepareUpload(*batch_)) return SyncResult::StorageError;
-    const size_t bodyLength = serializePush(*batch_, body_.get(), BODY_BYTES);
+    const size_t bodyLength = serializePush(*batch_, body, BODY_BYTES);
     if (!bodyLength) {
       LOG_ERR("ANKI", "Cannot encode review upload");
       return SyncResult::ProtocolError;
@@ -76,8 +87,8 @@ SyncResult AnkiSyncClient::run(const Connection& connection, const SyncCallbacks
     if (!store_->markUploadAttempted(batch_->batchId)) return SyncResult::StorageError;
     received = 0;
     result = HttpDownloader::requestToken(connection.url + "/push", connection.token.c_str(), "POST",
-                                          std::string_view(body_.get(), bodyLength), response, RESPONSE_BYTES - 1,
-                                          status, cancelled);
+                                          std::string_view(body, bodyLength), response, RESPONSE_BYTES - 1, status,
+                                          cancelled);
     PushReceipt receipt;
     if (result != HttpDownloader::OK ||
         !decoder_->parsePushReceipt(response_.get(), received, batch_->batchId, batch_->count, receipt) ||
@@ -93,17 +104,22 @@ SyncResult AnkiSyncClient::run(const Connection& connection, const SyncCallbacks
   if (cancelled()) return SyncResult::Cancelled;
   phase(SyncPhase::Downloading);
   if (!decoder_->initialize(pullCallbacks_)) return SyncResult::StorageError;
+  bool decoderRejected = false;
   result = HttpDownloader::requestToken(
       connection.url + "/pull?max_cards=250&max_total=1000", connection.token.c_str(), "GET", {},
-      [&](const uint8_t* data, size_t length) { return decoder_->feed(data, length); }, PullDecoder::MAX_PULL_BYTES,
-      status, cancelled);
+      [&](const uint8_t* data, size_t length) {
+        if (decoder_->feed(data, length)) return true;
+        decoderRejected = true;
+        return false;
+      },
+      PullDecoder::MAX_PULL_BYTES, status, cancelled);
   if (result != HttpDownloader::OK || !decoder_->finish()) {
     store_->cancelSnapshot();
     LOG_ERR("ANKI", "Card download rejected: %s", decoder_->error());
     if (store_->failed()) return SyncResult::StorageError;
-    return cancelled()                    ? SyncResult::Cancelled
-           : result != HttpDownloader::OK ? SyncResult::ConnectionError
-                                          : SyncResult::ProtocolError;
+    return cancelled()                                       ? SyncResult::Cancelled
+           : decoderRejected || result == HttpDownloader::OK ? SyncResult::ProtocolError
+                                                             : SyncResult::ConnectionError;
   }
   if (cancelled()) {
     store_->cancelSnapshot();

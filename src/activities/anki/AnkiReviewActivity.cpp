@@ -67,11 +67,11 @@ void AnkiReviewActivity::loadNextCard(const uint16_t start) {
   answer = false;
   selectingRating = false;
   focusedAction = kReveal;
+  // A Confirm held during a touch rating owns its release on the next screen.
+  ignoreConfirmRelease = mappedInput.isPressed(MappedInputManager::Button::Confirm);
   if (!store.nextUnreviewed(deckId, start, card)) {
     storageError = store.failed();
     done = !storageError;
-    // A Confirm held while a touch rating completes the deck owns its release.
-    if (done) ignoreConfirmRelease = mappedInput.isPressed(MappedInputManager::Button::Confirm);
     if (storageError) LOG_ERR("ANKI", "Cannot locate next unreviewed card");
     return;
   }
@@ -80,6 +80,8 @@ void AnkiReviewActivity::loadNextCard(const uint16_t start) {
 }
 
 void AnkiReviewActivity::loadSide() {
+  uiReady = false;
+  pageLayoutValid = false;
   if (!store.readSide(card.ordinal, answer, side.get(), anki::MAX_SIDE_BYTES + 1)) {
     LOG_ERR("ANKI", "Cannot read card %u %s", card.ordinal, answer ? "answer" : "question");
     storageError = true;
@@ -99,6 +101,7 @@ bool AnkiReviewActivity::actionEnabled(const int action) const {
 
 void AnkiReviewActivity::moveFocus(const int delta) {
   focusedAction = kAgain + (focusedAction - kAgain + delta + 4) % 4;
+  uiReady = false;
   requestUpdate();
 }
 
@@ -145,6 +148,8 @@ void AnkiReviewActivity::changePage(const bool next) {
     pageStart = previous;
     --pageNumber;
   }
+  uiReady = false;
+  pageLayoutValid = false;
   requestUpdate();
 }
 
@@ -198,10 +203,14 @@ void AnkiReviewActivity::loop() {
   RenderLock lock(*this);
   if (InputReleaseGuard::consumeInitialRelease(mappedInput, MappedInputManager::Button::Confirm, ignoreConfirmRelease))
     return;
+  // A button burst must not reveal, select or grade the next unseen screen.
+  // Back and error dismissal remain available while a redraw is pending.
+  if (!uiReady && !storageError && !saveError) return;
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
     if (!done && !storageError && !saveError && answer && !selectingRating) {
       selectingRating = true;
       focusedAction = kGood;
+      uiReady = false;
       requestUpdate();
     } else {
       activateAction(done ? kRepeat : (answer ? focusedAction : kReveal));
@@ -282,9 +291,18 @@ void AnkiReviewActivity::drawCard(UiApp::ScreenType& screen) {
     rowsPerPage = std::min(kLineCapacity, static_cast<size_t>(availableHeight / lineHeight));
     pageStart = {};
     pageNumber = 0;
+    pageLayoutValid = false;
   }
-  page =
-      anki::text::layoutPage(side.get(), sideLength, pageStart, textWidth, lines.data(), rowsPerPage, {this, measure});
+  if (!pageLayoutValid) {
+    // Focus/tap redraws reuse the borrowed line offsets. Text measurement can
+    // perform contextual shaping, so repeat it only when the page changes.
+    page = anki::text::layoutPage(side.get(), sideLength, pageStart, textWidth, lines.data(), rowsPerPage,
+                                  {this, measure});
+    pageLayoutValid = true;
+#ifdef SIMULATOR
+    ++layoutPasses;
+#endif
+  }
   if (!actionEnabled(focusedAction)) focusedAction = answer ? kGood : kReveal;
   renderer.beginTextClip(x, headerBottom, width, availableHeight);
   for (size_t i = 0; i < page.lineCount; ++i) {

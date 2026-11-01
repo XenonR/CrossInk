@@ -222,6 +222,15 @@ TEST_F(SyncTest, CompleteNdjsonDoesNotPublishWhenTransportReportsFailure) {
   EXPECT_EQ(store.cardCount(), 1);
 }
 
+TEST_F(SyncTest, MalformedStreamPreservesInstalledSnapshotAndReportsProtocolError) {
+  install();
+  replies = {{"/health", HEALTH}, {"/pull?max_cards=250&max_total=1000", "{bad-json}\n"}};
+  EXPECT_EQ(client.run(CONNECTION), anki::SyncResult::ProtocolError);
+  ASSERT_TRUE(store.open());
+  EXPECT_STREQ(store.generation(), "old");
+  EXPECT_EQ(store.cardCount(), 1);
+}
+
 TEST_F(SyncTest, TruncatedPullAfterAcknowledgmentKeepsReviewedCardHidden) {
   queueReview();
   auto incomplete = snapshot("new");

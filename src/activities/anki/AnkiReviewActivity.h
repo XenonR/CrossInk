@@ -35,6 +35,7 @@ class AnkiReviewActivity final : public Activity {
   SimulatorState simulatorState() const {
     return {card.ordinal, pageNumber, answer, selectingRating, done, storageError || saveError, page.hasMore};
   }
+  uint32_t simulatorLayoutPasses() const { return layoutPasses; }
   freeink::ui::Rect simulatorActionRect(int action) const { return actionRects[action]; }
   bool simulatorPageHasBold() const {
     bool found = false;
@@ -75,12 +76,14 @@ class AnkiReviewActivity final : public Activity {
   bool done = false;
   bool storageError = false;
   bool saveError = false;
+  bool pageLayoutValid = false;
   bool uiReady = false;
   bool ignoreConfirmRelease = false;
   freeink::ui::GfxRendererTarget uiTarget;
   UiApp app;
 #ifdef SIMULATOR
   std::array<freeink::ui::Rect, 8> actionRects{};
+  uint32_t layoutPasses = 0;
 #endif
   ScreenTransitionRefresh refresh;
 

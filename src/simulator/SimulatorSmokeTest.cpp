@@ -2877,8 +2877,8 @@ class SimulatorSmokeTest {
 
 #if CROSSINK_APP_CAP_ANKI
 // This opt-in scenario runs only against the runner's temporary SD directory.
-// Inputs use the regular activity loop; simulator accessors only inspect state
-// and locate controls whose geometry depends on theme, scale and orientation.
+// Inputs use the regular activity loop. Simulator hooks inspect state, locate
+// controls and submit a credential candidate through the real save flow.
 class AnkiSimulatorSmokeTest {
  public:
   void tick() {
@@ -2943,6 +2943,38 @@ class AnkiSimulatorSmokeTest {
         }
         captureOrientations("action-error");
         createSnapshot();
+        if (!anki::AnkiConnectionStore::save({"http://127.0.0.1:5050", "anki-original-token"}))
+          fail("Cannot save original collection connection");
+        activityManager.goToAnkiSync(true);
+        advance(Step::CachedConnection);
+        break;
+      case Step::CachedConnection: {
+        checkPending(0, 5);
+        auto* sync = dynamic_cast<AnkiSyncActivity*>(activityManager.simulatorCurrentActivity());
+        if (!sync || !syncState().configureOnly) fail("Expected cached-card connection configuration");
+        {
+          RenderLock lock;
+          sync->simulatorSaveConnection({"http://127.0.0.1:5051", "anki-replacement-token"});
+        }
+        advance(Step::CollectionConfirmation);
+        break;
+      }
+      case Step::CollectionConfirmation:
+        requireActivity("Confirmation");
+        captureOrientations("collection-confirmation");
+        button(MappedInputManager::Button::Back, Step::CollectionCancelled);
+        break;
+      case Step::CollectionCancelled: {
+        requireActivity("AnkiSync");
+        anki::Connection saved;
+        if (!anki::AnkiConnectionStore::load(saved) || saved.url != "http://127.0.0.1:5050" ||
+            saved.token != "anki-original-token")
+          fail("Cancelling collection confirmation changed the saved connection");
+        button(MappedInputManager::Button::Back, Step::CollectionReturned);
+        break;
+      }
+      case Step::CollectionReturned:
+        requireActivity("AnkiHome");
         openTheme();
         break;
       case Step::ThemeHome: {
@@ -2989,22 +3021,26 @@ class AnkiSimulatorSmokeTest {
         const auto state = review().simulatorState();
         if (state.cardOrdinal != 0 || state.answer || state.error || !state.hasMore || !review().simulatorPageHasBold())
           fail("Long Unicode/bold question did not render");
+        checkLayout(true);
         capture("question");
         button(MappedInputManager::Button::Down, Step::QuestionNext);
         break;
       }
       case Step::QuestionNext:
+        checkLayout(true);
         if (review().simulatorState().pageNumber != 1 || review().simulatorState().answer ||
             !review().simulatorPageHasBold())
           fail("Side button did not page, preserving bold");
         button(MappedInputManager::Button::Up, Step::QuestionPrevious);
         break;
       case Step::QuestionPrevious:
+        checkLayout(true);
         if (review().simulatorState().pageNumber != 0) fail("Previous page did not return");
         swipe(renderer.getScreenWidth() * 3 / 4, renderer.getScreenHeight() / 2, renderer.getScreenWidth() / 4,
               renderer.getScreenHeight() / 2, Step::QuestionSwiped);
         break;
       case Step::QuestionSwiped:
+        checkLayout(true);
         if (review().simulatorState().pageNumber != 1) fail("Swipe did not page");
         {
           RenderLock lock;
@@ -3013,6 +3049,7 @@ class AnkiSimulatorSmokeTest {
         advance(Step::Landscape);
         break;
       case Step::Landscape:
+        checkLayout(true);
         if (review().simulatorState().pageNumber != 0 || !review().simulatorState().hasMore)
           fail("Orientation change did not relayout the card");
         {
@@ -3022,38 +3059,52 @@ class AnkiSimulatorSmokeTest {
         advance(Step::Reveal);
         break;
       case Step::Reveal:
-        button(MappedInputManager::Button::Confirm, Step::Answer);
+        checkLayout(true);
+        burstConfirm();
+        advance(Step::Answer);
         break;
       case Step::Answer:
+        checkLayout(true);
         if (!review().simulatorState().answer || review().simulatorState().selectingRating)
           fail("Question Confirm must only reveal answer");
         capture("answer");
-        button(MappedInputManager::Button::Confirm, Step::RatingSelector);
+        burstConfirm();
+        advance(Step::RatingSelector);
         break;
       case Step::RatingSelector:
+        checkLayout(false);
         if (!review().simulatorState().selectingRating || review().simulatorState().cardOrdinal != 0)
           fail("Answer Confirm must open the rating selector without grading");
         checkPending(0, 5);
         button(MappedInputManager::Button::Up, Step::AgainSelection);
         break;
       case Step::AgainSelection:
+        checkLayout(false);
         button(MappedInputManager::Button::Up, Step::GradeAgain);
         break;
       case Step::GradeAgain:
-        button(MappedInputManager::Button::Confirm, Step::CardOne);
+        checkLayout(false);
+        burstConfirm();
+        advance(Step::CardOne);
         break;
       case Step::CardOne:
+        checkLayout(true);
         checkCard(1);
         checkPending(1, 4);
         tapAction(2, Step::HardAnswer);
         break;
       case Step::HardAnswer:
         if (!review().simulatorState().answer) fail("Touch did not reveal answer");
+        mappedInputManager.simulatorInjectPress(MappedInputManager::Button::Confirm);
         tapAction(4, Step::CardTwo);
         break;
       case Step::CardTwo:
         checkCard(2);
         checkPending(2, 3);
+        button(MappedInputManager::Button::Confirm, Step::CardTwoReleaseConsumed);
+        break;
+      case Step::CardTwoReleaseConsumed:
+        checkCard(2);
         button(MappedInputManager::Button::Confirm, Step::GoodAnswer);
         break;
       case Step::GoodAnswer:
@@ -3127,7 +3178,8 @@ class AnkiSimulatorSmokeTest {
         if (!review().simulatorState().done) fail("Completed batch did not show completion");
         captureOrientations("completion");
         checkPending(5, 0);
-        button(MappedInputManager::Button::Confirm, Step::RepeatStarted);
+        burstConfirm();
+        advance(Step::RepeatStarted);
         break;
       case Step::RepeatStarted:
         checkCard(0);
@@ -3258,6 +3310,10 @@ class AnkiSimulatorSmokeTest {
   enum class Step {
     Start,
     EmptyHome,
+    CachedConnection,
+    CollectionConfirmation,
+    CollectionCancelled,
+    CollectionReturned,
     ThemeHome,
     ThemeDecks,
     SelectDeckFirst,
@@ -3276,6 +3332,7 @@ class AnkiSimulatorSmokeTest {
     CardOne,
     HardAnswer,
     CardTwo,
+    CardTwoReleaseConsumed,
     GoodAnswer,
     CardThree,
     EasyAnswer,
@@ -3320,6 +3377,7 @@ class AnkiSimulatorSmokeTest {
   bool restart = false;
   bool resumeRepeat = false;
   uint16_t repeatOrdinal = 0;
+  uint32_t layoutPasses = 0;
   size_t initialHandles = 0;
   size_t initialThreads = 0;
   std::filesystem::path blockedJournal;
@@ -3364,6 +3422,23 @@ class AnkiSimulatorSmokeTest {
     anki::Deck deck;
     if (!store.open() || !store.readDeck(0, deck) || store.pendingCount() != pending || deck.remaining != remaining)
       fail("Durable pending/remaining counts differ from UI progress");
+  }
+  void checkLayout(const bool changed) {
+    RenderLock lock;
+    const auto current = review().simulatorLayoutPasses();
+    if ((current != layoutPasses) != changed) fail("Card layout was not reused or invalidated as expected");
+    layoutPasses = current;
+  }
+  static void burstConfirm() {
+    if (activityManager.requestUpdateAndWait() != RequestUpdateResult::Rendered) fail("Burst render rejected");
+    // Dispatch regular activity input without flushing its deferred redraw.
+    // Only the first release may affect the screen the user has actually seen.
+    for (int i = 0; i < 3; ++i) {
+      mappedInputManager.simulatorClearInputFrame();
+      mappedInputManager.simulatorInjectRelease(MappedInputManager::Button::Confirm);
+      review().loop();
+    }
+    mappedInputManager.simulatorClearInputFrame();
   }
   void advance(Step next, int frames = 3) {
     step = next;

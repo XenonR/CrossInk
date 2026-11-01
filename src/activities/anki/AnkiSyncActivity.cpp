@@ -88,7 +88,7 @@ void AnkiSyncActivity::saveConnection(anki::Connection candidate) {
     return;
   }
   const bool changed = candidate.url != connection.url || candidate.token != connection.token;
-  if (changed && store.pendingCount() != 0) {
+  if (changed && (store.pendingCount() != 0 || store.cardCount() != 0)) {
     auto confirmation = makeUniqueNoThrow<ConfirmationActivity>(renderer, mappedInput, tr(STR_ANKI_CONNECTION),
                                                                 tr(STR_ANKI_SAME_COLLECTION));
     if (!confirmation) {

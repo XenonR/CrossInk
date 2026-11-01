@@ -8,12 +8,16 @@
 
 ### Changed
 
+- Reduce Anki sync memory use and repeated SD reads, and reuse card pagination when moving between rating buttons.
 - Remove the "Repeat deck" subtitle from completed Anki decks; select a deck to see the repeat option.
 - Remove redundant Anki card-count subtitles; deck totals remain in the existing progress counter.
 - Remove on-screen Anki page buttons to give cards more reading space; long questions and answers still page with swipes or physical buttons.
 
 ### Fixed
 
+- Prevent rapid or held Anki button presses from acting on an unseen answer or next card.
+- Reject malformed Anki responses and connection files, discard failed card imports, and allow interrupted snapshot activation to retry safely while retaining review evidence.
+- Require same-collection confirmation when changing the Anki connection while downloaded cards remain, even before any ratings have been saved.
 - Restore X4 Pro firmware and simulator builds after the Anki deck-label update.
 - Wrap Anki completion, error, empty-library, and sync messages within the screen, keeping nearby controls clear at both UI sizes.
 

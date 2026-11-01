@@ -63,6 +63,23 @@ TEST_F(StoreTest, EmptyBatchIsAValidSnapshot) {
   EXPECT_TRUE(store.hasSnapshot());
   EXPECT_EQ(store.cardCount(), 0);
 }
+TEST_F(StoreTest, SnapshotChecksumsKeepTheVersionOneBytesAcrossTransferBlocks) {
+  anki::AnkiStore store;
+  ASSERT_TRUE(store.open());
+  ASSERT_TRUE(store.beginSnapshot("crc-fixture", 1));
+  const anki::CardInput card{100, 1, "Deck", "123456789", "", 9, 0};
+  ASSERT_TRUE(store.appendCard(card));
+  ASSERT_TRUE(store.commitSnapshot());
+  const auto& snapshot = Storage.files["/.crossink-anki/cards.bin"];
+  ASSERT_EQ(snapshot.size(), 433U);
+  // Independently calculated IEEE CRC32 of the 305-byte version 1 payload.
+  // It crosses the 256-byte checksum block boundary, exercising continuation.
+  EXPECT_EQ(snapshot[16], 0x41);
+  EXPECT_EQ(snapshot[17], 0x3b);
+  EXPECT_EQ(snapshot[18], 0x29);
+  EXPECT_EQ(snapshot[19], 0xb6);
+  ASSERT_TRUE(store.open());
+}
 TEST_F(StoreTest, RejectsDuplicateCardsAndPreservesInstalledContent) {
   anki::AnkiStore store;
   ASSERT_TRUE(store.open());
@@ -75,6 +92,85 @@ TEST_F(StoreTest, RejectsDuplicateCardsAndPreservesInstalledContent) {
   store.cancelSnapshot();
   ASSERT_TRUE(store.open());
   EXPECT_STREQ(store.generation(), "generation-one");
+}
+TEST_F(StoreTest, StagingIoFailuresDiscardPartialDeckAndCardUpdates) {
+  for (const bool existingDeck : {false, true}) {
+    // Existing-deck lookup adds seek/read before the seven card/deck writes.
+    const int operationCount = existingDeck ? 9 : 7;
+    for (int failure = 0; failure < operationCount; ++failure) {
+      SCOPED_TRACE(::testing::Message() << existingDeck << "/" << failure);
+      Storage = {};
+      anki::AnkiStore store;
+      ASSERT_TRUE(store.open());
+      ASSERT_TRUE(install(store));
+      ASSERT_TRUE(store.beginSnapshot("replacement", existingDeck ? 2 : 1));
+      const anki::CardInput first{98, 3, "New", "F", "B", 1, 1};
+      const anki::CardInput next{99, 3, "New", "F", "B", 1, 1};
+      if (existingDeck) {
+        ASSERT_TRUE(store.appendCard(first));
+      }
+      Storage.failAfter = failure;
+      EXPECT_FALSE(store.appendCard(next));
+      Storage.failAfter = -1;
+      // A retry on the damaged import cannot double-count a deck or publish it.
+      EXPECT_FALSE(store.appendCard(next));
+      EXPECT_FALSE(store.commitSnapshot());
+      ASSERT_TRUE(store.open());
+      EXPECT_STREQ(store.generation(), "generation-one");
+      ASSERT_TRUE(install(store, "replacement", 1));
+      anki::Deck deck;
+      ASSERT_TRUE(store.readDeck(0, deck));
+      EXPECT_EQ(deck.cardCount, 1);
+      for (const auto& [path, handles] : Storage.handles) EXPECT_EQ(handles, 0) << path;
+    }
+  }
+}
+TEST_F(StoreTest, FreshDeckCountReadsOnlyItsDirectoryRecord) {
+  anki::AnkiStore store;
+  ASSERT_TRUE(store.open());
+  ASSERT_TRUE(install(store, "many-cards", anki::MAX_CARDS));
+  Storage.bytesRead = Storage.openCalls = 0;
+  anki::Deck deck;
+  ASSERT_TRUE(store.readDeck(0, deck));
+  EXPECT_EQ(deck.remaining, anki::MAX_CARDS / 2);
+  EXPECT_EQ(Storage.openCalls, 1U);
+  EXPECT_EQ(Storage.bytesRead, 256U);
+  ASSERT_TRUE(store.recordReview(0, 3, 10));
+  ASSERT_TRUE(store.readDeck(0, deck));
+  EXPECT_EQ(deck.remaining, anki::MAX_CARDS / 2 - 1);
+}
+TEST_F(StoreTest, CardLookupScansOneHandleAndKeepsExhaustionDistinctFromIoFailure) {
+  anki::AnkiStore store;
+  ASSERT_TRUE(store.open());
+  ASSERT_TRUE(install(store, "many-cards", anki::MAX_CARDS));
+  Storage.bytesRead = Storage.openCalls = 0;
+  anki::CardInfo card;
+  EXPECT_FALSE(store.nextUnreviewed(99, 0, card));
+  EXPECT_FALSE(store.failed());
+  EXPECT_EQ(Storage.openCalls, 1U);
+  EXPECT_EQ(Storage.bytesRead, anki::MAX_CARDS * 40U);
+  ASSERT_TRUE(store.nextUnreviewed(2, anki::MAX_CARDS - 2, card));
+  EXPECT_EQ(card.ordinal, anki::MAX_CARDS - 1);
+  ASSERT_TRUE(store.recordReview(card.ordinal, 3, 10));
+  EXPECT_FALSE(store.nextUnreviewed(2, anki::MAX_CARDS - 2, card));
+  EXPECT_FALSE(store.failed());
+  Storage.failAfter = 2;  // open, seek, then first index read fails.
+  EXPECT_FALSE(store.nextUnreviewed(1, 0, card));
+  EXPECT_TRUE(store.failed());
+  for (const auto& [path, handles] : Storage.handles) EXPECT_EQ(handles, 0) << path;
+}
+TEST_F(StoreTest, CardLookupSkipsReviewedRunsWithoutReopeningOrReadingTheirIndexes) {
+  anki::AnkiStore store;
+  ASSERT_TRUE(store.open());
+  ASSERT_TRUE(install(store, "cards", 4));
+  ASSERT_TRUE(store.recordReview(1, 3, 10));
+  ASSERT_TRUE(store.recordReview(2, 3, 10));
+  Storage.bytesRead = Storage.openCalls = 0;
+  anki::CardInfo card;
+  EXPECT_FALSE(store.nextUnreviewed(99, 0, card));
+  EXPECT_FALSE(store.failed());
+  EXPECT_EQ(Storage.openCalls, 1U);
+  EXPECT_EQ(Storage.bytesRead, 80U);
 }
 TEST_F(StoreTest, RatingsSurviveAndCannotBeRecordedTwice) {
   anki::AnkiStore store;
@@ -266,6 +362,68 @@ TEST_F(StoreTest, InterruptedActivationAlwaysPreservesOldOrCompleteNew) {
     EXPECT_TRUE(std::string(restarted.generation()) == "replacement" ||
                 std::string(restarted.generation()) == "generation-one")
         << failure;
+  }
+}
+TEST_F(StoreTest, InterruptedActivationCanRetryTheSameGenerationWithoutTruncatingItsJournal) {
+  anki::AnkiStore store;
+  ASSERT_TRUE(store.open());
+  ASSERT_TRUE(install(store));
+  const auto oldJournal = journal();
+  ASSERT_TRUE(store.beginSnapshot("replacement", 1));
+  const anki::CardInput card{99, 3, "New", "F", "B", 1, 1};
+  ASSERT_TRUE(store.appendCard(card));
+  Storage.failRename = true;
+  EXPECT_FALSE(store.commitSnapshot());
+  store.cancelSnapshot();
+  std::string replacementJournal;
+  for (const auto& [path, bytes] : Storage.files)
+    if (path.ends_with(".log") && path != oldJournal) replacementJournal = path;
+  ASSERT_FALSE(replacementJournal.empty());
+  const auto original = Storage.files[replacementJournal];
+  ASSERT_EQ(original.size(), 96U);
+  ASSERT_TRUE(store.open());
+  EXPECT_STREQ(store.generation(), "generation-one");
+  // The previous journal write could have failed its sync. A failed re-sync
+  // must preserve the installed generation and allow another clean retry.
+  Storage.failSyncPath = replacementJournal;
+  EXPECT_FALSE(install(store, "replacement", 1));
+  EXPECT_EQ(Storage.files[replacementJournal], original);
+  ASSERT_TRUE(store.open());
+  EXPECT_STREQ(store.generation(), "generation-one");
+  ASSERT_TRUE(install(store, "replacement", 1));
+  EXPECT_EQ(Storage.files[replacementJournal], original);
+  EXPECT_STREQ(store.generation(), "replacement");
+}
+TEST_F(StoreTest, ActivationRetryPreservesNonemptyOrDamagedGenerationJournals) {
+  for (const bool damagedHeader : {false, true}) {
+    Storage = {};
+    anki::AnkiStore store;
+    ASSERT_TRUE(store.open());
+    ASSERT_TRUE(install(store));
+    const auto oldJournal = journal();
+    ASSERT_TRUE(store.beginSnapshot("replacement", 1));
+    const anki::CardInput card{99, 3, "New", "F", "B", 1, 1};
+    ASSERT_TRUE(store.appendCard(card));
+    Storage.failRename = true;
+    EXPECT_FALSE(store.commitSnapshot());
+    store.cancelSnapshot();
+    std::string replacementJournal;
+    for (const auto& [path, bytes] : Storage.files)
+      if (path.ends_with(".log") && path != oldJournal) replacementJournal = path;
+    ASSERT_FALSE(replacementJournal.empty());
+    auto& bytes = Storage.files[replacementJournal];
+    if (damagedHeader)
+      bytes[16] ^= 1;
+    else
+      bytes.push_back(1);
+    const auto evidence = bytes;
+    ASSERT_TRUE(store.beginSnapshot("replacement", 1));
+    ASSERT_TRUE(store.appendCard(card));
+    EXPECT_FALSE(store.commitSnapshot());
+    EXPECT_EQ(Storage.files[replacementJournal], evidence);
+    store.cancelSnapshot();
+    ASSERT_TRUE(store.open());
+    EXPECT_STREQ(store.generation(), "generation-one");
   }
 }
 TEST_F(StoreTest, EveryActivationCheckpointRetainsThePreviousReviewJournal) {
