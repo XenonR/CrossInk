@@ -13,6 +13,7 @@
 
 ### Fixed
 
+- Show a single Anki deck subtitle: "N cards", or "Repeat N cards" when repeating is available.
 - Wrap Anki completion, error, empty-library, and sync messages within the screen, keeping nearby controls clear at both UI sizes.
 
 ## [v1.6.1] - 2026-10-03
