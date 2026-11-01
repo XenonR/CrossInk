@@ -27,6 +27,7 @@ constexpr int kReveal = 2;
 constexpr int kAgain = 3;
 constexpr int kGood = 5;
 constexpr int kLastAction = 6;
+constexpr int kRepeat = 7;
 constexpr unsigned long kMaxReviewMs = 3600000;
 constexpr time_t kEarliestValidEpoch = 1704067200;  // 2024-01-01 UTC
 }  // namespace
@@ -63,12 +64,16 @@ void AnkiReviewActivity::onExit() {
 }
 
 void AnkiReviewActivity::loadNextCard(const uint16_t start) {
+  uiReady = false;
+  done = false;
   answer = false;
   selectingRating = false;
   focusedAction = kReveal;
   if (!store.nextUnreviewed(deckId, start, card)) {
     storageError = store.failed();
     done = !storageError;
+    // A Confirm held while a touch rating completes the deck owns its release.
+    if (done) ignoreConfirmRelease = mappedInput.isPressed(MappedInputManager::Button::Confirm);
     if (storageError) LOG_ERR("ANKI", "Cannot locate next unreviewed card");
     return;
   }
@@ -90,6 +95,7 @@ void AnkiReviewActivity::loadSide() {
 }
 
 bool AnkiReviewActivity::actionEnabled(const int action) const {
+  if (done) return action == kRepeat;
   if (action == kPrevious) return pageNumber > 0;
   if (action == kNext) return page.hasMore;
   return answer ? action >= kAgain && action <= kLastAction : action == kReveal;
@@ -147,12 +153,20 @@ void AnkiReviewActivity::changePage(const bool next) {
 }
 
 void AnkiReviewActivity::activateAction(const int action) {
-  if (done || storageError || saveError) {
+  if (storageError || saveError) {
     finish();
     return;
   }
   if (!actionEnabled(action)) return;
-  if (action == kPrevious || action == kNext) {
+  if (action == kRepeat) {
+    if (!store.restartDeck(deckId)) {
+      LOG_ERR("ANKI", "Cannot persist deck restart");
+      saveError = true;
+    } else {
+      loadNextCard(0);
+    }
+    requestUpdate();
+  } else if (action == kPrevious || action == kNext) {
     changePage(action == kNext);
   } else if (action == kReveal) {
     answer = true;
@@ -196,11 +210,11 @@ void AnkiReviewActivity::loop() {
       focusedAction = kGood;
       requestUpdate();
     } else {
-      activateAction(answer ? focusedAction : kReveal);
+      activateAction(done ? kRepeat : (answer ? focusedAction : kReveal));
     }
     return;
   }
-  if (done || storageError || saveError) return;
+  if (storageError || saveError) return;
   if (uiReady) {
     const auto snapshot = touchSnapshotFrom(mappedInput);
     if (snapshot.touchPressed || snapshot.touchReleased) {
@@ -209,6 +223,7 @@ void AnkiReviewActivity::loop() {
       if (event) return;
     }
   }
+  if (done) return;
   const auto swipe = mappedInput.wasSwipe();
   if (swipe == MappedInputManager::SwipeDir::Up || swipe == MappedInputManager::SwipeDir::Left) {
     changePage(true);
@@ -326,7 +341,15 @@ void AnkiReviewActivity::screen(UiApp::ScreenType& screen, void* context) {
                               : (self->storageError ? tr(STR_ANKI_STORAGE_ERROR) : tr(STR_ANKI_SESSION_DONE));
     auto style = screen.theme().bodyText;
     style.align = fui::TextAlign::Center;
-    anki::ui::drawMessage(screen.target(), screen.body(), message, style);
+    auto bounds = screen.body();
+    if (self->done && !self->storageError && !self->saveError) {
+      const int16_t height = std::max(44, static_cast<int>(screen.theme().rowHeight));
+      const fui::Rect button{bounds.x, static_cast<int16_t>(bounds.y + bounds.height - height), bounds.width, height};
+      self->focusedAction = kRepeat;
+      self->drawAction(screen, button, kRepeat, tr(STR_ANKI_REPEAT_DECK));
+      bounds.height = std::max(0, bounds.height - height - screen.theme().spaceSm);
+    }
+    anki::ui::drawMessage(screen.target(), bounds, message, style);
     return;
   }
   self->drawCard(screen);
@@ -336,12 +359,15 @@ void AnkiReviewActivity::render(RenderLock&&) {
   renderer.clearScreen();
   char title[96];
   snprintf(title, sizeof(title), "%s — %s", tr(STR_ANKI), answer ? tr(STR_ANKI_ANSWER) : tr(STR_ANKI_QUESTION));
-  TouchHeaderBackButton::drawCompact(renderer, title);
+  TouchHeaderBackButton::drawCompact(renderer, done ? tr(STR_ANKI) : title);
   app.setDevice(uiTarget.deviceContext());
   uiReady = false;
   app.render();
   uiReady = true;
-  const char* confirmLabel = answer ? tr(STR_SELECT) : tr(STR_ANKI_SHOW_ANSWER);
+  const char* confirmLabel = storageError || saveError ? tr(STR_BACK)
+                             : done                    ? tr(STR_ANKI_REPEAT_DECK)
+                             : answer                  ? tr(STR_SELECT)
+                                                       : tr(STR_ANKI_SHOW_ANSWER);
   const auto labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), confirmLabel,
                                             selectingRating ? tr(STR_DIR_UP) : tr(STR_PREV_PAGE),
                                             selectingRating ? tr(STR_DIR_DOWN) : tr(STR_NEXT_PAGE));

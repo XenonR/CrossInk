@@ -3,7 +3,8 @@
 ## First release contract
 
 The firmware reviews a downloaded due-card batch, not a complete Anki collection.
-Each card receives one rating per download, including Again. Anki Desktop owns
+Each card receives one rating per pass, including Again. Completed decks can be
+repeated offline; every pass's ratings are uploaded in order. Anki Desktop owns
 scheduling; reconnect to obtain the next batch. Text, line breaks and basic bold
 are supported. Images, audio, HTML templates, local scheduling and discovery are
 outside this release.
@@ -21,7 +22,13 @@ outside this release.
 4. Select a deck, read the question, reveal the answer and rate it. Use swipes
    or side buttons to page through long content. Physical Confirm reveals the
    answer, then opens a rating selector; confirm the selected rating to save it.
-5. Sync again to upload saved ratings and replace the batch with Desktop's
+5. When a deck is complete, choose **Repeat deck** to review all its downloaded
+   cards again. You can also select a completed deck from the Anki list to reach
+   this action. Touch or physical Confirm starts a pass; Back returns to the list.
+   Additional ratings will sync to Anki Desktop, including ratings of cards
+   previously marked Good or Easy. Leaving, sleeping or restarting retains
+   accepted ratings; selecting an unfinished deck resumes its remaining cards.
+6. Sync again to upload all saved ratings and replace the batch with Desktop's
    current due cards. There is no automatic or background synchronization.
 
 If an upload needs attention, open its recovery action to write a readable
@@ -89,6 +96,12 @@ Independent versioned journals retain ratings and upload transitions. A rating
 is accepted only after write, sync and close succeed. Activation preserves the
 previous valid snapshot/journal pair. Recovery validates integrity and generation;
 missing/mismatched journals never mean that every card is unreviewed.
+
+Journal version 2 adds a durable deck-restart marker. It resets only the selected
+deck's current-pass progress and retains all earlier reviews and acknowledgments.
+Existing version 1 journals remain readable and are upgraded on their first
+repeat through a synced copy, preserving the original. Card snapshots remain
+version 1. Do not clear Anki data to enable repeats.
 
 FAT rename is not a physical atomicity guarantee. Tests must interrupt each
 activation step; real SD power-cut tests remain a release requirement.
@@ -158,10 +171,17 @@ No physical-device or live Anki Desktop results are claimed. Before release:
 1. Test each pinned, unmodified add-on with **Home → Anki → Connection → Sync**.
    Confirm the intended collection, download, disconnect Wi-Fi, review all four
    ratings, sleep/restart, reconnect and inspect the actual desktop ratings.
+   Complete a deck and repeat it using physical Confirm, leave midway, sleep or
+   restart, then resume and finish. Open the completed deck from the list and
+   repeat using touch. Sync and inspect Desktop's review history: every pass's
+   ratings must appear in order. Release a Confirm held during the last touch
+   rating; it must leave the completion screen visible.
 2. Interrupt power during journal writes and snapshot activation. Exercise SD
    full/removal, cancelled downloads and desktop timeout/crash. Accepted local
    ratings must survive; failed writes must keep the current card ungraded;
    interrupted downloads must preserve a matching installed snapshot/journal.
+   Include deck-restart writes and a version 1 journal's first repeat/upgrade.
+   Earlier ratings must survive with either completed or restarted pass progress.
 3. Lose or partially deliver a push receipt, then restart. Confirm uploads pause,
    export the SD report, reconcile in Desktop, and use **Handled in Anki Desktop**.
    Check that uncertain events are retained and never automatically replayed.

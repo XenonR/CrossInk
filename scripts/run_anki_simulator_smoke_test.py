@@ -30,11 +30,12 @@ class AnkiServer(ThreadingHTTPServer):
         self.generation = f"anki-smoke-empty-p{version}"
         self.requests: list[tuple[str, str]] = []
         self.batches: list[str] = []
-        self.reviews: dict[int, int] = {}
+        self.reviews: list[tuple[int, int]] = []
         self.errors: list[str] = []
 
     def validate(self) -> None:
-        expected = {7000: 1, 7001: 2, 7002: 3, 7003: 4, 7004: 3}
+        expected = [(7000, 1), (7001, 2), (7002, 3), (7003, 4), (7004, 3)]
+        expected += [(card_id, 4) for card_id in range(7000, 7005)]
         if self.errors or self.reviews != expected or len(self.batches) != 2:
             raise AssertionError(f"Unexpected protocol {self.version} upload: {self.errors}, {self.reviews}")
         if self.requests != [("GET", "/health"), ("POST", "/push"), ("POST", "/push"), ("GET", "/pull")]:
@@ -111,11 +112,11 @@ class AnkiHandler(BaseHTTPRequestHandler):
                 raise ValueError("Repeated batch upload")
             for review in reviews:
                 card_id, ease = review["card_id"], review["ease"]
-                if card_id in self.server.reviews or card_id not in range(7000, 7005) or ease not in range(1, 5):
-                    raise ValueError("Repeated or invalid card review")
+                if card_id not in range(7000, 7005) or ease not in range(1, 5):
+                    raise ValueError("Invalid card review")
                 if not 0 <= review["duration_ms"] <= 3600000:
                     raise ValueError("Invalid review duration")
-                self.server.reviews[card_id] = ease
+                self.server.reviews.append((card_id, ease))
         except (ValueError, KeyError, TypeError) as error:
             self.require(False, f"Invalid push body: {error}")
             return
@@ -127,6 +128,7 @@ class AnkiHandler(BaseHTTPRequestHandler):
 def run_phase(program: Path, root: Path, env: dict[str, str], phase: str, timeout: int) -> int:
     env["CROSSINK_SIMULATOR_ANKI_SMOKE"] = phase
     marker = {"review": "Anki simulator smoke passed", "restart": "Anki simulator restart passed",
+              "repeat": "Anki simulator repeat passed",
               "sync": "Anki simulator sync passed"}[phase]
     try:
         result = subprocess.run([str(program)], cwd=root, env=env, text=True,
@@ -178,7 +180,7 @@ def main() -> int:
                 captures = args.captures.resolve() / f"protocol-{version}"
                 captures.mkdir(parents=True, exist_ok=True)
                 env["CROSSINK_SIMULATOR_ANKI_CAPTURES"] = str(captures)
-            for phase in ("review", "restart"):
+            for phase in ("review", "restart", "repeat"):
                 result = run_phase(program, root, env, phase, args.timeout)
                 if result:
                     return result
@@ -196,7 +198,7 @@ def main() -> int:
                 server.shutdown()
                 server.server_close()
                 thread.join(timeout=5)
-            print(f"Protocol {version}: five ratings uploaded once in two batches; empty snapshot installed.")
+            print(f"Protocol {version}: ten original/repeated ratings uploaded once in two batches; empty snapshot installed.")
     return 0
 
 

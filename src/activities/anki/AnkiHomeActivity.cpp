@@ -164,7 +164,7 @@ void AnkiHomeActivity::row(void* context, const uint16_t index, fui::ListItem& i
   item.actionValue = static_cast<int16_t>(index);
   if (index == 0) {
     item.label = tr(STR_ANKI_SYNC);
-    snprintf(self->rowValue, sizeof(self->rowValue), "%u", self->store.pendingCount());
+    snprintf(self->rowValue, sizeof(self->rowValue), "%lu", static_cast<unsigned long>(self->store.pendingCount()));
     item.value = self->rowValue;
     item.subtitle = tr(STR_ANKI_PENDING_REVIEWS);
   } else if (index == 1) {
@@ -175,7 +175,8 @@ void AnkiHomeActivity::row(void* context, const uint16_t index, fui::ListItem& i
     item.label = self->rowDeck.name;
     snprintf(self->rowValue, sizeof(self->rowValue), "%u/%u", self->rowDeck.remaining, self->rowDeck.cardCount);
     item.value = self->rowValue;
-    item.enabled = self->rowDeck.remaining > 0 && !self->store.needsAttention();
+    if (self->rowDeck.remaining == 0) item.subtitle = tr(STR_ANKI_REPEAT_DECK);
+    item.enabled = self->rowDeck.cardCount > 0 && !self->store.needsAttention();
   } else {
     item.label = tr(STR_ANKI_STORAGE_ERROR);
     item.enabled = false;

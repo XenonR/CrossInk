@@ -80,7 +80,7 @@ class AnkiReviewActivity final : public Activity {
   freeink::ui::GfxRendererTarget uiTarget;
   UiApp app;
 #ifdef SIMULATOR
-  std::array<freeink::ui::Rect, 7> actionRects{};
+  std::array<freeink::ui::Rect, 8> actionRects{};
 #endif
   ScreenTransitionRefresh refresh;
 
