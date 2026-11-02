@@ -36,6 +36,7 @@ class AnkiReviewActivity final : public Activity {
     return {card.ordinal, pageNumber, answer, selectingRating, done, storageError || saveError, page.hasMore};
   }
   uint32_t simulatorLayoutPasses() const { return layoutPasses; }
+  int simulatorFocusedAction() const { return focusedAction; }
   freeink::ui::Rect simulatorActionRect(int action) const { return actionRects[action]; }
   bool simulatorPageHasBold() const {
     bool found = false;

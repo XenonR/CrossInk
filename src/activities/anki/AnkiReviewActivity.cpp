@@ -236,22 +236,25 @@ void AnkiReviewActivity::loop() {
     changePage(false);
     return;
   }
+  // Side-button releases also match PageForward/PageBack. Resolve the rating
+  // mode first so those aliases cannot turn a rating change into page navigation.
+  if (selectingRating) {
+    if (mappedInput.wasReleased(MappedInputManager::Button::Down) ||
+        mappedInput.wasReleased(MappedInputManager::Button::Right))
+      moveFocus(1);
+    else if (mappedInput.wasReleased(MappedInputManager::Button::Up) ||
+             mappedInput.wasReleased(MappedInputManager::Button::Left))
+      moveFocus(-1);
+    return;
+  }
   if (mappedInput.wasReleased(MappedInputManager::Button::PageForward) ||
-      mappedInput.wasReleased(MappedInputManager::Button::Right)) {
+      mappedInput.wasReleased(MappedInputManager::Button::Right) ||
+      mappedInput.wasReleased(MappedInputManager::Button::Down)) {
     changePage(true);
   } else if (mappedInput.wasReleased(MappedInputManager::Button::PageBack) ||
-             mappedInput.wasReleased(MappedInputManager::Button::Left)) {
+             mappedInput.wasReleased(MappedInputManager::Button::Left) ||
+             mappedInput.wasReleased(MappedInputManager::Button::Up)) {
     changePage(false);
-  } else if (mappedInput.wasReleased(MappedInputManager::Button::Down)) {
-    if (selectingRating)
-      moveFocus(1);
-    else
-      changePage(true);
-  } else if (mappedInput.wasReleased(MappedInputManager::Button::Up)) {
-    if (selectingRating)
-      moveFocus(-1);
-    else
-      changePage(false);
   }
 }
 

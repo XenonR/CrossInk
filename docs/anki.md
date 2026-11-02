@@ -28,6 +28,11 @@ queue, not Desktop's configurable learning-step scheduler.
 
 ## Using Anki
 
+Physical controls work throughout review: Confirm reveals the answer, then opens
+the rating selector; directional buttons choose a rating, and Confirm saves it.
+Outside rating selection, directional buttons page through long text. Side-button
+page mappings do not change the direction of rating selection.
+
 1. Install one of the supported, unmodified Xteink-Anki desktop add-ons using
    its installation instructions. Keep Anki Desktop open with the intended
    collection selected.

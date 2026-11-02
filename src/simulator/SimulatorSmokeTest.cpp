@@ -3024,6 +3024,7 @@ class AnkiSimulatorSmokeTest {
         if (state.cardOrdinal != 0 || state.answer || state.error || !state.hasMore || !review().simulatorPageHasBold())
           fail("Long Unicode/bold question did not render");
         checkLayout(true);
+        checkPhysicalPaging();
         capture("question");
         button(MappedInputManager::Button::Down, Step::QuestionNext);
         break;
@@ -3078,6 +3079,7 @@ class AnkiSimulatorSmokeTest {
         if (!review().simulatorState().selectingRating || review().simulatorState().cardOrdinal != 0)
           fail("Answer Confirm must open the rating selector without grading");
         checkPending(0, 5);
+        checkPhysicalRatingNavigation();
         button(MappedInputManager::Button::Up, Step::AgainSelection);
         break;
       case Step::AgainSelection:
@@ -3465,6 +3467,44 @@ class AnkiSimulatorSmokeTest {
     if ((current != layoutPasses) != changed) fail("Card layout was not reused or invalidated as expected");
     layoutPasses = current;
   }
+  void checkPhysicalPaging() {
+    using Button = MappedInputManager::Button;
+    constexpr Button directions[] = {Button::Down, Button::Up, Button::Right, Button::Left};
+    for (const auto direction : directions) {
+      mappedInputManager.simulatorClearInputFrame();
+      injectButton(direction);
+      review().loop();
+      if (activityManager.requestUpdateAndWait() != RequestUpdateResult::Rendered) fail("Page render rejected");
+      const auto state = review().simulatorState();
+      const bool next = direction == Button::Down || direction == Button::Right;
+      if (state.pageNumber != (next ? 1U : 0U) || state.answer || state.selectingRating)
+        fail("Front or aliased side release did not page exactly once");
+      checkLayout(true);
+    }
+    mappedInputManager.simulatorClearInputFrame();
+  }
+  void checkPhysicalRatingNavigation() {
+    using Button = MappedInputManager::Button;
+    constexpr Button directions[] = {Button::Up, Button::Down, Button::Left, Button::Right, Button::Up, Button::Down};
+    int expected = 5;  // Good is the initial rating focus.
+    for (size_t i = 0; i < std::size(directions); ++i) {
+      const auto direction = directions[i];
+      const int delta = direction == Button::Down || direction == Button::Right ? 1 : -1;
+      for (int rating = 0; rating < 4; ++rating) {
+        mappedInputManager.simulatorClearInputFrame();
+        injectButton(direction, i >= 4);
+        review().loop();
+        if (activityManager.requestUpdateAndWait() != RequestUpdateResult::Rendered) fail("Rating render rejected");
+        expected = 3 + (expected - 3 + delta + 4) % 4;
+        const auto state = review().simulatorState();
+        if (review().simulatorFocusedAction() != expected || state.pageNumber != 0 || !state.answer ||
+            !state.selectingRating || state.cardOrdinal != 0)
+          fail("Front or aliased side release did not select exactly one rating");
+        checkLayout(false);
+      }
+    }
+    mappedInputManager.simulatorClearInputFrame();
+  }
   static void burstConfirm() {
     if (activityManager.requestUpdateAndWait() != RequestUpdateResult::Rendered) fail("Burst render rejected");
     // Dispatch regular activity input without flushing its deferred redraw.
@@ -3480,8 +3520,19 @@ class AnkiSimulatorSmokeTest {
     step = next;
     waitFrames = frames;
   }
-  void button(MappedInputManager::Button button, Step next) {
+  static void injectButton(MappedInputManager::Button button, const bool reversedPages = false) {
     mappedInputManager.simulatorInjectRelease(button);
+    // Hardware exposes each side release under both its direction and its
+    // configured page action. Logical-only injection used to hide alias bugs.
+    if (button == MappedInputManager::Button::Up)
+      mappedInputManager.simulatorInjectRelease(reversedPages ? MappedInputManager::Button::PageForward
+                                                              : MappedInputManager::Button::PageBack);
+    else if (button == MappedInputManager::Button::Down)
+      mappedInputManager.simulatorInjectRelease(reversedPages ? MappedInputManager::Button::PageBack
+                                                              : MappedInputManager::Button::PageForward);
+  }
+  void button(MappedInputManager::Button button, Step next) {
+    injectButton(button);
     advance(next);
   }
   void tap(int x, int y, Step next) {
