@@ -49,6 +49,7 @@ My goal with this fork was to maintain the core Crosspoint firmware while integr
 - Reading stats: total books read, total reading time, number of sessions, pages turned, average session time, pages turned per minute. You can also set your reading stats as your sleep screen.
 - All-time reading stats [syncing](./docs/reading-stats-sync.md) between two CrossInk devices.
 - Reading [progress sync](./docs/nearby-position-sync.md) between two CrossInk devices.
+- Offline [Anki flashcard reviews](#anki-flashcards) with manual sync to Anki Desktop on all supported devices.
 - Added customizable Auto Page Turn Interval (anything between 5-120 seconds).
 - Added ability to view Recent Books as a 3x3 grid view.
 - To view a more detailed list for each version, visit the [releases](https://github.com/uxjulia/CrossInk/releases) page to read release notes.
@@ -87,6 +88,54 @@ Reader Options, Focus Reading, Guide Dots, Force Paragraph Indents, reading stat
 CrossInk adds configurable button shortcuts.
 
 See [Controls](./docs/controls.md) for the full action list and defaults.
+
+### Anki flashcards
+
+Open **Home → Anki** to review flashcards offline, then sync your ratings back to Anki Desktop. CrossInk downloads a batch of due cards to the SD card; saved ratings and your place in the deck survive sleep and restarts.
+
+1. Install a supported Xteink-Anki desktop add-on and keep Anki Desktop open with your collection selected.
+2. On the reader, open **Anki → Connection**, enter the add-on's server address and token, then choose **Sync**. Both devices must be on the same local network.
+3. Select a downloaded deck and review without Wi-Fi. Sync again to upload your ratings and download the next due batch. Sync is manual.
+
+Use **Again**, **Hard**, **Good**, or **Easy** to rate an answer. Again and Hard return cards later in the same pass, targeting gaps of two and five intervening saved answers respectively; small decks can repeat sooner. Good and Easy complete the card for the current pass. Once every card is complete, **Repeat deck** starts another offline pass and saves those additional ratings too. With physical buttons, Confirm reveals the answer, then opens the rating selector; choose a rating with the directional buttons and Confirm to save. Outside the selector, directional buttons page through long text.
+
+<table>
+  <tr>
+    <td align="center">
+      <img src="./docs/images/anki-x4-classic-home.png" alt="X4 Classic simulator home screen with Anki selected" width="360" /><br/>
+      <em>Home screen — X4 Classic simulator build</em>
+    </td>
+    <td align="center">
+      <img src="./docs/images/anki-x4-classic-review.png" alt="X4 Classic simulator showing an Anki answer and the four ratings" width="360" /><br/>
+      <em>Offline Anki review — X4 Classic simulator build</em>
+    </td>
+  </tr>
+</table>
+
+All devices support text, line breaks, and basic bold. Images, audio, HTML templates, timed learning steps, and local FSRS scheduling are not supported. Anki Desktop handles long-term scheduling; the reader holds a due-card batch, not your whole collection. Downloads request up to **250 cards per deck**, within the device's total limit below. Use one collection and avoid reviewing the downloaded cards elsewhere until you upload the reader's ratings: there is no conflict detection. If an upload cannot be confirmed, CrossInk retains the ratings for manual reconciliation instead of automatically sending them again.
+
+See the [Anki guide](./docs/anki.md) for supported add-on versions (protocols 2 and 3), setup, review behavior, and recovery instructions.
+
+#### Xteink X3 and original X4 limitations
+
+- New downloads: **250 cards total**, with at most **4,096 UTF-8 bytes per question or answer** to fit the ESP32-C3's limited RAM.
+- The byte limit can be reached before the desktop add-on's character limit for non-ASCII text. Lower its `max_text_chars` setting if needed; 1,024 characters fits even with four-byte UTF-8 characters. Oversized downloads are rejected without replacing the installed cards.
+- Physical buttons only; touch controls and swipes are unavailable.
+
+#### Xteink X4 Classic limitations
+
+- New downloads: **1,000 cards total**, with at most **16,384 UTF-8 bytes per question or answer**.
+- Physical buttons only; the ESP32-S3 and PSRAM allow the larger batch, but this device has no touchscreen.
+
+#### Xteink X4 Pro limitations
+
+- New downloads: **1,000 cards total**, with at most **16,384 UTF-8 bytes per question or answer**.
+- Touch controls and physical buttons are supported. The shared text-only and scheduling limitations above still apply.
+
+#### Seeed Studio reTerminal Sticky limitations
+
+- New downloads: **1,000 cards total**, with at most **16,384 UTF-8 bytes per question or answer**.
+- Touch controls and physical buttons are supported. The shared text-only and scheduling limitations above still apply.
 
 ---
 
