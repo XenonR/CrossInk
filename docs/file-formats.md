@@ -76,6 +76,11 @@ review. Incomplete final bytes can be repaired through a synced temporary prefix
 and preserved damaged original. Fully sized checksum-invalid records are retained
 for recovery rather than silently dropped.
 
+`pull.tmp` is a disposable raw NDJSON download, capped at 64 MiB. It is parsed
+only after complete HTTP delivery and checked SD sync/close. It is never loaded
+at startup or used as a resumable snapshot; the next sync truncates leftovers.
+Device-specific download limits do not change the binary snapshot or journals.
+
 `recovery-<batch-id>.ndjson` is a readable report of uncertain reviews. Marking
 reviews handled records a manual resolution while retaining the original journal
 and report. FAT renames do not guarantee physical atomicity; power-cut hardware

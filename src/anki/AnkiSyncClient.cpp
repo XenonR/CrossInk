@@ -1,8 +1,10 @@
 #include "AppCapabilities.h"
 #if CROSSINK_APP_CAP_ANKI
+#include <HalStorage.h>
 #include <Logging.h>
 #include <Memory.h>
 
+#include <algorithm>
 #include <cstring>
 
 #include "AnkiStore.h"
@@ -10,45 +12,86 @@
 #include "network/HttpDownloader.h"
 
 namespace anki {
-bool AnkiSyncClient::initialize(AnkiStore& store) {
-  store_ = nullptr;
-  // Buffers are activity-owned and reused across batches; keeping ~22 KiB off
-  // the small network-task stack also avoids per-response allocation churn.
-  if (!decoder_) decoder_ = makeUniqueNoThrow<PullDecoder>();
+namespace {
+constexpr char PULL_PATH[] = "/.crossink-anki/pull.tmp";
+
+void logMemory(const char* phase) {
+#if defined(ARDUINO_ARCH_ESP32) && !defined(SIMULATOR)
+  const auto internal = byteHeapSnapshot(MemoryPool::Internal);
+  const auto psram = byteHeapSnapshot(MemoryPool::Psram);
+  LOG_INF("ANKI", "Sync %s: internal free=%u largest=%u, PSRAM free=%u largest=%u", phase, unsigned(internal.free),
+          unsigned(internal.largest), unsigned(psram.free), unsigned(psram.largest));
+#else
+  (void)phase;
+#endif
+}
+}  // namespace
+
+bool AnkiSyncClient::allocateControlBuffers() {
+  // Reuse these bounded buffers for every upload batch, off the 4 KiB worker stack.
   if (!batch_) batch_ = makeUniqueNoThrow<UploadBatch>();
   if (!body_) {
-    // This 4 KiB request buffer cannot fit on the worker stack. Keep it in
-    // PSRAM: X4 Pro's default allocator prefers internal RAM at <= 4 KiB.
-#if defined(ARDUINO_ARCH_ESP32) && !defined(SIMULATOR)
+#if defined(ARDUINO_ARCH_ESP32) && !defined(SIMULATOR) && defined(FREEINK_FB_PSRAM) && FREEINK_FB_PSRAM
     body_ = makePsramByteBufferNoThrow(BODY_BYTES);
 #else
     body_ = makeHeapByteBufferNoThrow(BODY_BYTES);
 #endif
   }
   if (!response_) response_ = makeUniqueNoThrow<char[]>(RESPONSE_BYTES);
-  if (!decoder_ || !batch_ || !body_ || !response_) {
-    LOG_ERR("ANKI", "Cannot allocate sync workspace");
+  if (!batch_ || !body_ || !response_) {
+    LOG_ERR("ANKI", "Cannot allocate sync control workspace");
     return false;
   }
-  pullCallbacks_.context = &store;
+  return true;
+}
+
+bool AnkiSyncClient::initialize(AnkiStore& store, const PullLimits limits) {
+  store_ = nullptr;
+  limits_ = limits;
+  if (!decoder_) decoder_ = makeUniqueNoThrow<PullDecoder>();
+  if (!decoder_) {
+    LOG_ERR("ANKI", "Cannot allocate sync decoder");
+    return false;
+  }
+  if (!allocateControlBuffers()) return false;
+  pullCallbacks_.context = this;
   pullCallbacks_.onBegin = [](void* context, const char* generation, uint16_t count) {
-    return static_cast<AnkiStore*>(context)->beginSnapshot(generation, count);
+    auto& client = *static_cast<AnkiSyncClient*>(context);
+    const bool ok = client.store_->beginSnapshot(generation, count);
+    if (!ok) client.importFailed_ = true;
+    return ok;
   };
   pullCallbacks_.onCard = [](void* context, const CardInput& card) {
-    return static_cast<AnkiStore*>(context)->appendCard(card);
+    auto& client = *static_cast<AnkiSyncClient*>(context);
+    const bool ok = client.store_->appendCard(card);
+    if (!ok) client.importFailed_ = true;
+    return ok;
   };
   // Publication waits until both HTTP completion and decoder finish succeed.
   pullCallbacks_.onEnd = [](void*) { return true; };
-  if (!decoder_->initialize(pullCallbacks_)) return false;
+  if (!decoder_->initialize(pullCallbacks_, limits_)) return false;
   store_ = &store;
   return true;
 }
 
 SyncResult AnkiSyncClient::run(const Connection& connection, const SyncCallbacks callbacks) {
-  if (!store_ || !decoder_ || !body_ || !response_ || !batch_) return SyncResult::StorageError;
+  if (!store_ || !decoder_) return SyncResult::StorageError;
   if (!connection.configured()) return SyncResult::NotConfigured;
   if (store_->failed()) return SyncResult::StorageError;
   if (store_->needsAttention()) return SyncResult::Attention;
+  if (!allocateControlBuffers() || !decoder_->initialize(pullCallbacks_, limits_)) return SyncResult::StorageError;
+  importFailed_ = false;
+  logMemory("checking");
+  // The scratch file is never a resumable snapshot. A later run truncates any
+  // interrupted transfer; only the checked binary snapshot can be activated.
+  FsFile spool;
+  ScopedCleanup cleanup{[&] {
+    if (spool && !spool.close()) LOG_ERR("ANKI", "Cannot close download scratch file");
+    store_->cancelSnapshot();
+    if (Storage.exists(PULL_PATH) && !Storage.remove(PULL_PATH))
+      LOG_ERR("ANKI", "Cannot remove download scratch file; next sync will truncate it");
+    decoder_->initialize(pullCallbacks_, limits_);
+  }};
   auto* const body = reinterpret_cast<char*>(body_.get());
   const auto cancelled = [&]() { return callbacks.cancelled && callbacks.cancelled(callbacks.context); };
   const auto phase = [&](const SyncPhase value) {
@@ -70,7 +113,7 @@ SyncResult AnkiSyncClient::run(const Connection& connection, const SyncCallbacks
   Health health;
   if (!decoder_->parseHealth(response_.get(), received, health) || !health.collectionReady) {
     LOG_ERR("ANKI", "Desktop health/protocol rejected: %s", decoder_->error());
-    return SyncResult::ProtocolError;
+    return decoder_->allocationFailed() ? SyncResult::StorageError : SyncResult::ProtocolError;
   }
 
   phase(SyncPhase::Uploading);
@@ -103,29 +146,89 @@ SyncResult AnkiSyncClient::run(const Connection& connection, const SyncCallbacks
 
   if (cancelled()) return SyncResult::Cancelled;
   phase(SyncPhase::Downloading);
-  if (!decoder_->initialize(pullCallbacks_)) return SyncResult::StorageError;
-  bool decoderRejected = false;
+  // Release control-stage allocations before starting the pull. In particular,
+  // neither the pull arena nor import identities overlap the HTTP/TLS client.
+  decoder_->initialize(pullCallbacks_, limits_);
+  body_.reset();
+  response_.reset();
+  batch_.reset();
+  logMemory("downloading");
+  if (!Storage.mkdir("/.crossink-anki")) {
+    LOG_ERR("ANKI", "Cannot create download scratch directory");
+    return SyncResult::StorageError;
+  }
+  spool = Storage.open(PULL_PATH, O_WRONLY | O_CREAT | O_TRUNC);
+  if (!spool) {
+    LOG_ERR("ANKI", "Cannot create download scratch file");
+    return SyncResult::StorageError;
+  }
+  bool writeFailed = false;
+  const char* const path = limits_.maxCards == C3_PULL_LIMITS.maxCards ? "/pull?max_cards=250&max_total=250"
+                                                                       : "/pull?max_cards=250&max_total=1000";
   result = HttpDownloader::requestToken(
-      connection.url + "/pull?max_cards=250&max_total=1000", connection.token.c_str(), "GET", {},
-      [&](const uint8_t* data, size_t length) {
-        if (decoder_->feed(data, length)) return true;
-        decoderRejected = true;
+      connection.url + path, connection.token.c_str(), "GET", {},
+      [&](const uint8_t* data, const size_t length) {
+        if (spool.write(data, length) == length) return true;
+        LOG_ERR("ANKI", "Cannot write download scratch file");
+        writeFailed = true;
         return false;
       },
       PullDecoder::MAX_PULL_BYTES, status, cancelled);
-  if (result != HttpDownloader::OK || !decoder_->finish()) {
-    store_->cancelSnapshot();
-    LOG_ERR("ANKI", "Card download rejected: %s", decoder_->error());
-    if (store_->failed()) return SyncResult::StorageError;
-    return cancelled()                                       ? SyncResult::Cancelled
-           : decoderRejected || result == HttpDownloader::OK ? SyncResult::ProtocolError
-                                                             : SyncResult::ConnectionError;
+  const bool synced = result == HttpDownloader::OK && spool.sync();
+  const bool closed = spool.close();
+  if (writeFailed || !closed || (result == HttpDownloader::OK && !synced)) {
+    LOG_ERR("ANKI", "Cannot persist complete download scratch file");
+    return SyncResult::StorageError;
   }
-  if (cancelled()) {
-    store_->cancelSnapshot();
-    return SyncResult::Cancelled;
+  if (result != HttpDownloader::OK) return cancelled() ? SyncResult::Cancelled : SyncResult::ConnectionError;
+  if (cancelled()) return SyncResult::Cancelled;
+  spool = Storage.open(PULL_PATH, O_RDONLY);
+  if (!spool) {
+    LOG_ERR("ANKI", "Cannot reopen download scratch file");
+    return SyncResult::StorageError;
+  }
+  logMemory("importing");
+  struct ReadContext {
+    FsFile& file;
+    SyncCallbacks callbacks;
+    bool failed = false;
+    size_t remaining;
+  } source{spool, callbacks, false, spool.size()};
+  PullSource input;
+  input.context = &source;
+  input.read = [](void* context, uint8_t* output, const size_t capacity) {
+    auto& source = *static_cast<ReadContext*>(context);
+    if (!source.remaining) return 0;
+    const size_t expected = std::min(capacity, source.remaining);
+    const int count = source.file.read(output, expected);
+    if (count != static_cast<int>(expected)) {
+      LOG_ERR("ANKI", "Cannot read complete download scratch file");
+      source.failed = true;
+      return -1;
+    }
+    source.remaining -= static_cast<size_t>(count);
+#ifndef SIMULATOR
+    delay(0);
+#endif
+    return count;
+  };
+  input.cancelled = [](void* context) {
+    const auto& source = *static_cast<ReadContext*>(context);
+    return source.callbacks.cancelled && source.callbacks.cancelled(source.callbacks.context);
+  };
+  const bool decoded = decoder_->decode(input);
+  const bool readClosed = spool.close();
+  if (source.failed || !readClosed || importFailed_ || decoder_->allocationFailed() || store_->failed()) {
+    LOG_ERR("ANKI", "Cannot import downloaded card storage");
+    return SyncResult::StorageError;
+  }
+  if (cancelled()) return SyncResult::Cancelled;
+  if (!decoded) {
+    LOG_ERR("ANKI", "Card download rejected: %s", decoder_->error());
+    return SyncResult::ProtocolError;
   }
   if (!store_->commitSnapshot()) return SyncResult::StorageError;
+  logMemory("complete");
   return SyncResult::Success;
 }
 }  // namespace anki

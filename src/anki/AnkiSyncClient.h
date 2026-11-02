@@ -12,6 +12,14 @@
 namespace anki {
 class AnkiStore;
 
+// Classic is button-only but has PSRAM. Touch is not a memory capability.
+#if (defined(FREEINK_FB_PSRAM) && FREEINK_FB_PSRAM) || defined(SIMULATOR_DEVICE_STICKY) || \
+    defined(SIMULATOR_DEVICE_X4_PRO) || defined(SIMULATOR_DEVICE_X4_CLASSIC)
+inline constexpr PullLimits DEVICE_PULL_LIMITS = FULL_PULL_LIMITS;
+#else
+inline constexpr PullLimits DEVICE_PULL_LIMITS = C3_PULL_LIMITS;
+#endif
+
 enum class SyncPhase : uint8_t { Checking, Uploading, Downloading };
 enum class SyncResult : uint8_t {
   Success,
@@ -33,7 +41,7 @@ struct SyncCallbacks {
 // displays atomic progress; neither the client nor its callbacks navigate/draw.
 class AnkiSyncClient {
  public:
-  bool initialize(AnkiStore& store);
+  bool initialize(AnkiStore& store, PullLimits limits = DEVICE_PULL_LIMITS);
   SyncResult run(const Connection& connection, SyncCallbacks callbacks = {});
 
  private:
@@ -45,6 +53,9 @@ class AnkiSyncClient {
   HeapByteBuffer body_;
   std::unique_ptr<char[]> response_;
   PullCallbacks pullCallbacks_;
+  PullLimits limits_ = DEVICE_PULL_LIMITS;
+  bool importFailed_ = false;
+  bool allocateControlBuffers();
 };
 }  // namespace anki
 #endif

@@ -47,7 +47,7 @@ class SyncTest : public ::testing::Test {
     uploadedCards.clear();
     uploadedRatings.clear();
     ASSERT_TRUE(store.open());
-    ASSERT_TRUE(client.initialize(store));
+    ASSERT_TRUE(client.initialize(store, anki::FULL_PULL_LIMITS));
   }
   void install(const unsigned count = 1) {
     ASSERT_TRUE(store.beginSnapshot("old", count));
@@ -320,5 +320,120 @@ TEST_F(SyncTest, CancelledBeforeUploadDoesNotCreateUncertainBatch) {
   EXPECT_EQ(client.run(CONNECTION, callbacks), anki::SyncResult::Cancelled);
   EXPECT_FALSE(store.needsAttention());
   EXPECT_EQ(store.pendingCount(), 1);
+}
+constexpr char SCRATCH[] = "/.crossink-anki/pull.tmp";
+constexpr char C3_PULL[] = "/pull?max_cards=250&max_total=250";
+constexpr char FULL_PULL[] = "/pull?max_cards=250&max_total=1000";
+
+TEST_F(SyncTest, ConstrainedDownloadsUseSmallerBatchAndKeepStoredFormatCompatible) {
+  ASSERT_TRUE(client.initialize(store, anki::C3_PULL_LIMITS));
+  replies = {{"/health", HEALTH}, {C3_PULL, snapshot("constrained", 250)}};
+  ASSERT_EQ(client.run(CONNECTION), anki::SyncResult::Success);
+  EXPECT_EQ(store.cardCount(), 250);
+  EXPECT_FALSE(Storage.exists(SCRATCH));
+  // A larger snapshot remains readable when the same SD card moves to C3.
+  ASSERT_TRUE(client.initialize(store, anki::FULL_PULL_LIMITS));
+  replies = {{"/health", HEALTH}, {FULL_PULL, snapshot("full", 1000)}};
+  ASSERT_EQ(client.run(CONNECTION), anki::SyncResult::Success);
+  ASSERT_TRUE(client.initialize(store, anki::C3_PULL_LIMITS));
+  ASSERT_TRUE(store.open());
+  EXPECT_EQ(store.cardCount(), 1000);
+  EXPECT_TRUE(store.beginReview(1));
+}
+
+TEST_F(SyncTest, OversizedConstrainedCardsRejectWholeImportAndPreservePreviousBatch) {
+  install();
+  ASSERT_TRUE(client.initialize(store, anki::C3_PULL_LIMITS));
+  auto input = snapshot("too-long");
+  input.replace(input.find("Question"), 8, std::string(anki::C3_PULL_LIMITS.maxSideBytes + 1, 'x'));
+  replies = {{"/health", HEALTH}, {C3_PULL, input}};
+  EXPECT_EQ(client.run(CONNECTION), anki::SyncResult::ProtocolError);
+  ASSERT_TRUE(store.open());
+  EXPECT_STREQ(store.generation(), "old");
+  EXPECT_EQ(store.cardCount(), 1);
+  EXPECT_FALSE(Storage.exists(SCRATCH));
+}
+
+TEST_F(SyncTest, ScratchStorageFailuresNeverPublishAndCloseEveryHandle) {
+  // The seven failure points cover both writers and readers of the same path.
+  for (int failure = 0; failure < 7; ++failure) {
+    SCOPED_TRACE(failure);
+    Storage = {};
+    ASSERT_TRUE(store.open());
+    install();
+    ASSERT_TRUE(client.initialize(store, anki::C3_PULL_LIMITS));
+    switch (failure) {
+      case 0:
+        Storage.failOpenPath = SCRATCH;
+        break;
+      case 1:
+        Storage.failWritePath = SCRATCH;
+        break;
+      case 2:
+        Storage.failSyncPath = SCRATCH;
+        break;
+      case 3:
+        Storage.failClosePath = SCRATCH;
+        break;
+      case 4:
+        Storage.failOpenPath = SCRATCH;
+        Storage.failOpenFlags = O_RDONLY;
+        break;
+      case 5:
+        Storage.failReadPath = SCRATCH;
+        break;
+      case 6:
+        Storage.failWritePath = "/.crossink-anki/cards.tmp";
+        break;
+    }
+    replies = {{"/health", HEALTH}, {C3_PULL, snapshot("replacement", 2)}};
+    EXPECT_EQ(client.run(CONNECTION), anki::SyncResult::StorageError);
+    ASSERT_TRUE(store.open());
+    EXPECT_STREQ(store.generation(), "old");
+    EXPECT_EQ(store.cardCount(), 1);
+    EXPECT_FALSE(Storage.exists(SCRATCH));
+    for (const auto& [path, handles] : Storage.handles) EXPECT_EQ(handles, 0) << path;
+  }
+}
+
+TEST_F(SyncTest, StaleScratchIsTruncatedAndCleanupFailureCannotActivateItLater) {
+  Storage.files[SCRATCH] = std::vector<uint8_t>(4000, 'x');
+  Storage.failRemovePath = SCRATCH;
+  replies = {{"/health", HEALTH}, {FULL_PULL, snapshot("first")}};
+  ASSERT_EQ(client.run(CONNECTION), anki::SyncResult::Success);
+  EXPECT_TRUE(Storage.exists(SCRATCH));
+  ASSERT_TRUE(store.open());
+  EXPECT_STREQ(store.generation(), "first");
+  replies = {{"/health", HEALTH}, {FULL_PULL, snapshot("second", 0)}};
+  ASSERT_EQ(client.run(CONNECTION), anki::SyncResult::Success);
+  EXPECT_FALSE(Storage.exists(SCRATCH));
+  EXPECT_STREQ(store.generation(), "second");
+  EXPECT_EQ(store.cardCount(), 0);
+}
+
+TEST_F(SyncTest, CancellationDuringScratchParsingDiscardsPartialImport) {
+  install();
+  size_t beforeReads = Storage.bytesRead;
+  const anki::SyncCallbacks callbacks{
+      &beforeReads, [](void* context) { return Storage.bytesRead > *static_cast<size_t*>(context); }, nullptr};
+  replies = {{"/health", HEALTH}, {FULL_PULL, snapshot("replacement", 40)}};
+  EXPECT_EQ(client.run(CONNECTION, callbacks), anki::SyncResult::Cancelled);
+  ASSERT_TRUE(store.open());
+  EXPECT_STREQ(store.generation(), "old");
+  EXPECT_FALSE(Storage.exists(SCRATCH));
+  for (const auto& [path, handles] : Storage.handles) EXPECT_EQ(handles, 0) << path;
+}
+
+TEST_F(SyncTest, FailedImportAllocationLeavesInstalledContentAndPermitsRetry) {
+  install();
+  // Existing response/batch arrays are already allocated by initialize().
+  anki_test_memory::failNextArray = true;
+  replies = {{"/health", HEALTH}, {FULL_PULL, snapshot("replacement")}};
+  EXPECT_EQ(client.run(CONNECTION), anki::SyncResult::StorageError);
+  ASSERT_TRUE(store.open());
+  EXPECT_STREQ(store.generation(), "old");
+  EXPECT_FALSE(Storage.exists(SCRATCH));
+  replies = {{"/health", HEALTH}, {FULL_PULL, snapshot("replacement")}};
+  EXPECT_EQ(client.run(CONNECTION), anki::SyncResult::Success);
 }
 }  // namespace

@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -45,12 +46,12 @@ std::string metadata(unsigned count, unsigned version = 2) {
 }
 
 std::string card(const std::string& id = "9223372036854775807", const std::string& front = "Question",
-                 const std::string& back = "Answer") {
+                 const std::string& back = "Answer", const std::string& deckName = "Languages / Greek") {
   JsonDocument document;
   document["type"] = "card";
   document["id"] = id;
   document["deck_id"] = "1700000000000";
-  document["deck_name"] = "Languages / Greek";
+  document["deck_name"] = deckName;
   document["front"] = front;
   document["back"] = back;
   std::string output;
@@ -60,21 +61,41 @@ std::string card(const std::string& id = "9223372036854775807", const std::strin
 
 std::string end(unsigned count) { return "{\"type\":\"end\",\"card_count\":" + std::to_string(count) + "}\n"; }
 
-bool feed(PullDecoder& decoder, const std::string& input, const size_t chunk = 257) {
-  for (size_t offset = 0; offset < input.size(); offset += chunk) {
-    if (!decoder.feed(reinterpret_cast<const uint8_t*>(input.data() + offset), std::min(chunk, input.size() - offset)))
-      return false;
+struct StringSource {
+  const std::string& text;
+  size_t chunk = 257;
+  size_t position = 0;
+  size_t failAt = SIZE_MAX;
+  size_t cancelAt = SIZE_MAX;
+
+  PullSource source() {
+    return {this,
+            [](void* context, uint8_t* output, size_t capacity) {
+              auto& input = *static_cast<StringSource*>(context);
+              if (input.position >= input.failAt) return -1;
+              const size_t count =
+                  std::min({capacity, input.chunk, input.text.size() - input.position, input.failAt - input.position});
+              memcpy(output, input.text.data() + input.position, count);
+              input.position += count;
+              return static_cast<int>(count);
+            },
+            [](void* context) {
+              const auto& input = *static_cast<StringSource*>(context);
+              return input.position >= input.cancelAt;
+            }};
   }
-  return true;
+};
+
+bool decode(PullDecoder& decoder, const std::string& input, const size_t chunk = 257) {
+  StringSource source{input, chunk};
+  return decoder.decode(source.source());
 }
 
-TEST(AnkiProtocol, StreamsAcrossEveryByteAndDefersCommitUntilFinish) {
+TEST(AnkiProtocol, StreamsAcrossEveryByteAndFinishesOnlyAfterCompleteInput) {
   Capture capture;
   PullDecoder decoder;
   ASSERT_TRUE(decoder.initialize(capture.callbacks()));
-  ASSERT_TRUE(feed(decoder, metadata(1) + card() + end(1), 1)) << decoder.error();
-  EXPECT_FALSE(capture.ended);
-  ASSERT_TRUE(decoder.finish()) << decoder.error();
+  ASSERT_TRUE(decode(decoder, metadata(1) + card() + end(1), 1)) << decoder.error();
   EXPECT_TRUE(capture.ended);
   EXPECT_EQ(capture.ids, std::vector<int64_t>{INT64_MAX});
   EXPECT_EQ(capture.front, "Question");
@@ -89,8 +110,7 @@ TEST(AnkiProtocol, SupportsProtocolThreeAndEmptySnapshotsWithoutFinalNewline) {
   ASSERT_TRUE(decoder.initialize(capture.callbacks()));
   std::string input = metadata(0, 3) + end(0);
   input.pop_back();
-  ASSERT_TRUE(feed(decoder, input));
-  ASSERT_TRUE(decoder.finish());
+  ASSERT_TRUE(decode(decoder, input));
   EXPECT_EQ(decoder.protocolVersion(), 3);
   EXPECT_TRUE(capture.ended);
 }
@@ -102,7 +122,7 @@ TEST(AnkiProtocol, RejectsTruncationBadCountsAndTrailingRecords) {
     Capture capture;
     PullDecoder decoder;
     ASSERT_TRUE(decoder.initialize(capture.callbacks()));
-    EXPECT_FALSE(feed(decoder, input) && decoder.finish()) << input;
+    EXPECT_FALSE(decode(decoder, input)) << input;
     EXPECT_FALSE(capture.ended);
   }
 }
@@ -121,7 +141,7 @@ TEST(AnkiProtocol, RejectsEmbeddedNullSuffixesInRecordTypesAndStatuses) {
     Capture capture;
     PullDecoder decoder;
     ASSERT_TRUE(decoder.initialize(capture.callbacks()));
-    EXPECT_FALSE(feed(decoder, input) && decoder.finish());
+    EXPECT_FALSE(decode(decoder, input));
     EXPECT_FALSE(capture.ended);
   }
 }
@@ -132,7 +152,7 @@ TEST(AnkiProtocol, RejectsOversizedAndInvalidUtf8SidesWithoutCommitting) {
     Capture capture;
     PullDecoder decoder;
     ASSERT_TRUE(decoder.initialize(capture.callbacks()));
-    EXPECT_FALSE(feed(decoder, metadata(1) + card("1", front) + end(1)) && decoder.finish());
+    EXPECT_FALSE(decode(decoder, metadata(1) + card("1", front) + end(1)));
     EXPECT_FALSE(capture.ended);
   }
 }
@@ -146,41 +166,262 @@ TEST(AnkiProtocol, AcceptsMaximumUnicodeSidesAndReusesArenaAcrossCards) {
   Capture capture;
   PullDecoder decoder;
   ASSERT_TRUE(decoder.initialize(capture.callbacks()));
-  ASSERT_TRUE(feed(decoder, metadata(10, 3)));
-  for (unsigned i = 1; i <= 10; ++i)
-    ASSERT_TRUE(feed(decoder, card(std::to_string(i), front, back))) << decoder.error();
-  ASSERT_TRUE(feed(decoder, end(10)));
-  ASSERT_TRUE(decoder.finish()) << decoder.error();
+  std::string input = metadata(10, 3);
+  for (unsigned i = 1; i <= 10; ++i) input += card(std::to_string(i), front, back);
+  input += end(10);
+  ASSERT_TRUE(decode(decoder, input)) << decoder.error();
   EXPECT_EQ(capture.front, front);
   EXPECT_EQ(capture.back, back);
 }
 
 TEST(AnkiProtocol, StreamsLargeUnicodeDeckMetadataWithoutRetainingItsArray) {
-  JsonDocument meta;
-  meta["type"] = "meta";
-  meta["status"] = "success";
-  meta["protocol_version"] = 3;
-  meta["pull_id"] = "unicode-meta";
-  meta["card_count"] = 1000;
+  std::string input = metadata(1000, 3);
+  input.resize(input.size() - 2);  // Replace the final object brace/newline.
+  input += ",\"decks\":[";
   std::string name;
-  for (unsigned i = 0; i < 60; ++i) name += "\xf0\x90\x80\x80";
+  // Desktop's escaped CJK deck names need six wire bytes per UTF-8 character.
+  for (unsigned i = 0; i < 80; ++i) name += "\\u4e00";
   for (unsigned i = 0; i < 1000; ++i) {
-    auto deck = meta["decks"].add<JsonObject>();
-    deck["id"] = std::to_string(i + 1);
-    deck["name"] = name;
-    deck["card_count"] = 1;
+    if (i) input += ',';
+    input += "{\"id\":\"" + std::to_string(i + 1) + "\",\"name\":\"" + name + "\",\"card_count\":1}";
   }
-  std::string input;
-  serializeJson(meta, input);
-  ASSERT_GT(input.size(), size_t{128 * 1024});
+  input += "]}";
+  ASSERT_GT(input.size(), size_t{400 * 1024});
+  ASSERT_LE(input.size(), PullDecoder::MAX_LINE_BYTES);
   Capture capture;
   PullDecoder decoder;
   ASSERT_TRUE(decoder.initialize(capture.callbacks()));
-  ASSERT_TRUE(feed(decoder, input + '\n')) << decoder.error();
-  for (unsigned i = 0; i < 1000; ++i) ASSERT_TRUE(feed(decoder, card(std::to_string(i + 1)))) << decoder.error();
-  ASSERT_TRUE(feed(decoder, end(1000)));
-  ASSERT_TRUE(decoder.finish());
+  input += '\n';
+  for (unsigned i = 0; i < 1000; ++i) input += card(std::to_string(i + 1));
+  input += end(1000);
+  ASSERT_TRUE(decode(decoder, input)) << decoder.error();
   EXPECT_EQ(capture.ids.size(), size_t{1000});
+}
+
+TEST(AnkiProtocol, C3AcceptsItsMaximumCardCountAndUnicodeSidesInOneReusedArena) {
+  Capture capture;
+  PullDecoder decoder;
+  anki_protocol_test_memory::reset();
+  ASSERT_TRUE(decoder.initialize(capture.callbacks(), C3_PULL_LIMITS));
+  EXPECT_EQ(anki_protocol_test_memory::arenaAllocationCalls, size_t{0});
+  std::string front, back;
+  for (unsigned i = 0; i < C3_PULL_LIMITS.maxSideBytes / 4; ++i) {
+    front += "\xf0\x90\x80\x80";
+    back += "\xf0\x90\x80\x81";
+  }
+  const std::string deckName(MAX_DECK_NAME_BYTES, 'D');
+  std::string input = metadata(C3_PULL_LIMITS.maxCards, 3);
+  for (unsigned i = 1; i <= C3_PULL_LIMITS.maxCards; ++i) input += card(std::to_string(i), front, back, deckName);
+  input += end(C3_PULL_LIMITS.maxCards);
+  ASSERT_TRUE(decode(decoder, input)) << decoder.error();
+  EXPECT_EQ(capture.ids.size(), C3_PULL_LIMITS.maxCards);
+  EXPECT_EQ(capture.front, front);
+  EXPECT_EQ(capture.back, back);
+  EXPECT_EQ(anki_protocol_test_memory::arenaAllocationCalls, size_t{1});
+  EXPECT_EQ(anki_protocol_test_memory::lastArenaBytes, C3_PULL_LIMITS.arenaBytes);
+}
+
+TEST(AnkiProtocol, C3RejectsLargerNewPullsWithoutChangingStoredCardLimits) {
+  EXPECT_EQ(MAX_CARDS, 1000);
+  EXPECT_EQ(MAX_SIDE_BYTES, size_t{16 * 1024});
+  for (const auto& input :
+       {metadata(C3_PULL_LIMITS.maxCards + 1, 3) + end(0),
+        metadata(1, 3) + card("1", std::string(C3_PULL_LIMITS.maxSideBytes + 1, 'Q')) + end(1),
+        metadata(1, 3) + card("1", "Q", std::string(C3_PULL_LIMITS.maxSideBytes + 1, 'A')) + end(1)}) {
+    Capture capture;
+    PullDecoder decoder;
+    ASSERT_TRUE(decoder.initialize(capture.callbacks(), C3_PULL_LIMITS));
+    EXPECT_FALSE(decode(decoder, input));
+    EXPECT_FALSE(capture.ended);
+    EXPECT_FALSE(decoder.allocationFailed());
+  }
+}
+
+TEST(AnkiProtocol, AcceptsBlankLinesCrLfAndWhitespaceAfterTheEndRecord) {
+  Capture capture;
+  PullDecoder decoder;
+  ASSERT_TRUE(decoder.initialize(capture.callbacks(), C3_PULL_LIMITS));
+  std::string input = "\n \t\r\n  " + metadata(1) + "\r\n\t" + card() + "\n" + end(1) + " \t\r\n";
+  ASSERT_TRUE(decode(decoder, input, 3)) << decoder.error();
+  EXPECT_TRUE(capture.ended);
+}
+
+TEST(AnkiProtocol, EnforcesExactRecordByteLimitWhileSkippingFilteredValues) {
+  std::string record = metadata(0);
+  record.resize(record.size() - 2);
+  record += ",\"ignored\":\"";
+  record.resize(PullDecoder::MAX_LINE_BYTES - 2, 'x');
+  record += "\"}";
+  ASSERT_EQ(record.size(), PullDecoder::MAX_LINE_BYTES);
+  for (const bool oversize : {false, true}) {
+    Capture capture;
+    PullDecoder decoder;
+    ASSERT_TRUE(decoder.initialize(capture.callbacks(), C3_PULL_LIMITS));
+    std::string input = record;
+    if (oversize) input.insert(input.size() - 2, 1, 'x');
+    input += '\n' + end(0);
+    EXPECT_EQ(decode(decoder, input), !oversize) << decoder.error();
+    EXPECT_EQ(capture.ended, !oversize);
+  }
+}
+
+TEST(AnkiProtocol, RejectsRawNullsInFilteredValuesAfterObjectsAndAfterEnd) {
+  std::string filtered = metadata(0);
+  filtered.resize(filtered.size() - 2);
+  filtered += ",\"decks\":[{\"name\":\"hidden";
+  filtered += '\0';
+  filtered += "suffix\"}]}\n" + end(0);
+  std::string afterObject = metadata(0);
+  afterObject.insert(afterObject.size() - 1, 1, '\0');
+  afterObject += end(0);
+  std::string afterEnd = metadata(0) + end(0);
+  afterEnd += '\0';
+  for (const auto& input : {filtered, afterObject, afterEnd}) {
+    Capture capture;
+    PullDecoder decoder;
+    ASSERT_TRUE(decoder.initialize(capture.callbacks(), C3_PULL_LIMITS));
+    EXPECT_FALSE(decode(decoder, input, 1));
+    EXPECT_FALSE(capture.ended);
+  }
+}
+
+TEST(AnkiProtocol, RejectsTrailingBytesAndNewlinesInsideFilteredStrings) {
+  std::string malformed = metadata(0);
+  malformed.resize(malformed.size() - 2);
+  malformed += ",\"ignored\":\"split\nstring\"}\n" + end(0);
+  std::string trailing = metadata(0);
+  trailing.insert(trailing.size() - 1, "junk");
+  trailing += end(0);
+  for (const auto& input : {malformed, trailing}) {
+    Capture capture;
+    PullDecoder decoder;
+    ASSERT_TRUE(decoder.initialize(capture.callbacks(), C3_PULL_LIMITS));
+    EXPECT_FALSE(decode(decoder, input, 512));
+    EXPECT_FALSE(capture.ended);
+  }
+}
+
+TEST(AnkiProtocol, ReadErrorsAndCancellationNeverInvokeTheEndCallback) {
+  const std::string input = metadata(1) + card() + end(1);
+  for (const size_t stop : {size_t{0}, metadata(1).size() + 5, input.size()}) {
+    for (const bool cancelled : {false, true}) {
+      Capture capture;
+      PullDecoder decoder;
+      ASSERT_TRUE(decoder.initialize(capture.callbacks(), C3_PULL_LIMITS));
+      StringSource source{input, 1};
+      if (cancelled)
+        source.cancelAt = stop;
+      else
+        source.failAt = stop;
+      EXPECT_FALSE(decoder.decode(source.source())) << "stop=" << stop;
+      EXPECT_FALSE(capture.ended);
+      EXPECT_FALSE(decoder.allocationFailed());
+    }
+  }
+}
+
+TEST(AnkiProtocol, ChecksCancellationWhileConsumingBufferedBytes) {
+  const std::string input = metadata(1) + card() + end(1);
+  Capture capture;
+  PullDecoder decoder;
+  ASSERT_TRUE(decoder.initialize(capture.callbacks(), C3_PULL_LIMITS));
+  StringSource source{input, 512};
+  source.cancelAt = 1;
+  EXPECT_FALSE(decoder.decode(source.source()));
+  EXPECT_EQ(source.position, input.size());  // The first read prefetched every record.
+  EXPECT_FALSE(capture.ended);
+}
+
+TEST(AnkiProtocol, RejectsInvalidReadersAndCanResetAfterFailureOrCompletion) {
+  Capture capture;
+  PullDecoder decoder;
+  EXPECT_FALSE(decode(decoder, metadata(0) + end(0)));
+  ASSERT_TRUE(decoder.initialize(capture.callbacks()));
+  EXPECT_FALSE(decoder.decode({}));
+  ASSERT_TRUE(decoder.initialize(capture.callbacks()));
+  PullSource invalid{nullptr, [](void*, uint8_t*, size_t capacity) { return static_cast<int>(capacity + 1); }};
+  EXPECT_FALSE(decoder.decode(invalid));
+  ASSERT_TRUE(decoder.initialize(capture.callbacks()));
+  ASSERT_TRUE(decode(decoder, metadata(0) + end(0)));
+  EXPECT_FALSE(decode(decoder, metadata(0) + end(0)));
+  ASSERT_TRUE(decoder.initialize(capture.callbacks(), C3_PULL_LIMITS));
+  ASSERT_TRUE(decode(decoder, metadata(0, 3) + end(0)));
+}
+
+TEST(AnkiProtocol, BoundsTotalWireBytesIncludingWhitespaceAfterTheEndRecord) {
+  struct RepeatedSource {
+    std::string prefix = metadata(0) + end(0);
+    size_t position = 0;
+    size_t remaining;
+    PullSource source() {
+      return {this, [](void* context, uint8_t* output, size_t capacity) {
+                auto& source = *static_cast<RepeatedSource*>(context);
+                const size_t count = std::min(capacity, source.remaining);
+                for (size_t i = 0; i < count; ++i) {
+                  output[i] = source.position < source.prefix.size() ? source.prefix[source.position] : ' ';
+                  ++source.position;
+                }
+                source.remaining -= count;
+                return static_cast<int>(count);
+              }};
+    }
+  };
+  for (const bool oversize : {false, true}) {
+    Capture capture;
+    PullDecoder decoder;
+    ASSERT_TRUE(decoder.initialize(capture.callbacks(), C3_PULL_LIMITS));
+    RepeatedSource source{{metadata(0) + end(0)}, 0, PullDecoder::MAX_PULL_BYTES + (oversize ? 1 : 0)};
+    EXPECT_EQ(decoder.decode(source.source()), !oversize) << decoder.error();
+    EXPECT_EQ(capture.ended, !oversize);
+  }
+}
+
+TEST(AnkiProtocol, ReusesSmallControlArenaAndAllocatesPullArenaOnlyAfterReset) {
+  PullDecoder decoder;
+  Capture capture;
+  anki_protocol_test_memory::reset();
+  ASSERT_TRUE(decoder.initialize(capture.callbacks(), C3_PULL_LIMITS));
+  EXPECT_EQ(anki_protocol_test_memory::arenaAllocationCalls, size_t{0});
+  Health health;
+  const std::string response =
+      R"({"status":"ok","protocol_version":3,"collection_ready":true,"server_time":1790000000})";
+  for (unsigned i = 0; i < 3; ++i) ASSERT_TRUE(decoder.parseHealth(response.data(), response.size(), health));
+  EXPECT_EQ(anki_protocol_test_memory::arenaAllocationCalls, size_t{1});
+  EXPECT_EQ(anki_protocol_test_memory::lastArenaBytes, size_t{8192});
+  ASSERT_TRUE(decoder.initialize(capture.callbacks(), C3_PULL_LIMITS));
+  EXPECT_EQ(anki_protocol_test_memory::arenaAllocationCalls, size_t{1});
+  ASSERT_TRUE(decode(decoder, metadata(0) + end(0)));
+  EXPECT_EQ(anki_protocol_test_memory::arenaAllocationCalls, size_t{2});
+  EXPECT_EQ(anki_protocol_test_memory::lastArenaBytes, C3_PULL_LIMITS.arenaBytes);
+}
+
+TEST(AnkiProtocol, AllocationFailuresAreDistinctFromMalformedResponsesAndResetSafely) {
+  PullDecoder decoder;
+  Capture capture;
+  anki_protocol_test_memory::reset();
+  ASSERT_TRUE(decoder.initialize(capture.callbacks(), C3_PULL_LIMITS));
+  anki_protocol_test_memory::failNextArena = true;
+  EXPECT_FALSE(decode(decoder, metadata(0) + end(0)));
+  EXPECT_TRUE(decoder.allocationFailed());
+  EXPECT_FALSE(capture.ended);
+  ASSERT_TRUE(decoder.initialize(capture.callbacks(), C3_PULL_LIMITS));
+  EXPECT_FALSE(decoder.allocationFailed());
+  ASSERT_TRUE(decode(decoder, metadata(0) + end(0)));
+  ASSERT_TRUE(decoder.initialize());
+  anki_protocol_test_memory::failNextArena = true;
+  Health health;
+  const std::string response =
+      R"({"status":"ok","protocol_version":3,"collection_ready":true,"server_time":1790000000})";
+  EXPECT_FALSE(decoder.parseHealth(response.data(), response.size(), health));
+  EXPECT_TRUE(decoder.allocationFailed());
+  ASSERT_TRUE(decoder.initialize());
+  EXPECT_FALSE(decoder.parseHealth("{bad}", 5, health));
+  EXPECT_FALSE(decoder.allocationFailed());
+  ASSERT_TRUE(decoder.initialize(capture.callbacks(), {250, 4096, 1}));
+  EXPECT_FALSE(decode(decoder, metadata(0) + end(0)));
+  EXPECT_FALSE(decoder.allocationFailed());  // Document overflow, not backing allocation failure.
+  ASSERT_TRUE(decoder.initialize(capture.callbacks(), C3_PULL_LIMITS));
+  EXPECT_TRUE(decode(decoder, metadata(0) + end(0)));
 }
 
 TEST(AnkiProtocol, PropagatesStorageFailureAndEnforcesLineBound) {
@@ -188,10 +429,10 @@ TEST(AnkiProtocol, PropagatesStorageFailureAndEnforcesLineBound) {
   capture.acceptCards = false;
   PullDecoder decoder;
   ASSERT_TRUE(decoder.initialize(capture.callbacks()));
-  EXPECT_FALSE(feed(decoder, metadata(1) + card()));
+  EXPECT_FALSE(decode(decoder, metadata(1) + card()));
   EXPECT_FALSE(capture.ended);
   ASSERT_TRUE(decoder.initialize(capture.callbacks()));
-  EXPECT_FALSE(feed(decoder, std::string(PullDecoder::MAX_LINE_BYTES + 1, 'x')));
+  EXPECT_FALSE(decode(decoder, std::string(PullDecoder::MAX_LINE_BYTES + 1, 'x')));
 }
 
 TEST(AnkiProtocol, ParsesHealthWithoutAssumingCollectionReady) {

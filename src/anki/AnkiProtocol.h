@@ -31,20 +31,37 @@ struct PushReceipt {
   uint16_t rejected = 0;
 };
 
+// Transfer limits do not change the on-SD format or the size of existing cards.
+struct PullLimits {
+  uint16_t maxCards;
+  size_t maxSideBytes;
+  size_t arenaBytes;
+};
+
+inline constexpr PullLimits C3_PULL_LIMITS{250, 4096, 32768};
+inline constexpr PullLimits FULL_PULL_LIMITS{MAX_CARDS, MAX_SIDE_BYTES, 131072};
+
+struct PullSource {
+  void* context = nullptr;
+  // Positive byte count, zero at EOF, or a negative value on read failure.
+  int (*read)(void*, uint8_t*, size_t) = nullptr;
+  bool (*cancelled)(void*) = nullptr;
+};
+
 // One activity-owned workspace keeps parsing independent of HTTP and SD I/O.
 class PullDecoder {
  public:
   static constexpr size_t MAX_LINE_BYTES = 512 * 1024;
-  static constexpr size_t ARENA_BYTES = 128 * 1024;
   static constexpr size_t MAX_PULL_BYTES = 64 * 1024 * 1024;
 
   PullDecoder();
-  bool initialize(PullCallbacks callbacks = {});
-  bool feed(const uint8_t* data, size_t length);
-  bool finish();
+  // Resetting releases the previous workspace; allocation waits until parsing.
+  bool initialize(PullCallbacks callbacks = {}, PullLimits limits = FULL_PULL_LIMITS);
+  bool decode(PullSource source);
   uint8_t protocolVersion() const { return version_; }
   const char* generation() const { return generation_; }
   const char* error() const { return error_; }
+  bool allocationFailed() const { return allocationFailed_; }
 
   bool parseHealth(const char* data, size_t length, Health& health);
   bool parsePushReceipt(const char* data, size_t length, const char* expectedBatch, uint16_t expectedCount,
@@ -53,7 +70,8 @@ class PullDecoder {
  private:
   class Arena final : public ArduinoJson::Allocator {
    public:
-    bool initialize();
+    bool initialize(size_t capacity);
+    void release();
     void reset() { used_ = 0; }
     void* allocate(size_t size) override;
     void deallocate(void*) override {}
@@ -61,18 +79,38 @@ class PullDecoder {
 
    private:
     HeapByteBuffer storage_;
+    size_t capacity_ = 0;
     size_t used_ = 0;
+  };
+
+  struct LineInput {
+    PullDecoder& decoder;
+    int first;
+    int read();
+    size_t readBytes(char* output, size_t length);
   };
 
   enum class State : uint8_t { Uninitialized, Meta, Cards, Ended, Finished, Failed };
   bool parseJson(const char* data, size_t length);
-  bool processLine();
+  bool parseLine(int first);
+  bool processRecord();
+  int readByte();
+  int readLineByte();
   bool fail(const char* message);
 
   Arena arena_;
   JsonDocument document_;
-  HeapByteBuffer line_;
   PullCallbacks callbacks_;
+  PullLimits limits_ = FULL_PULL_LIMITS;
+  PullSource source_;
+  // Activity-owned transfer scratch avoids both per-read allocation and a
+  // sector-sized array on the small network worker stack.
+  uint8_t input_[512] = {};
+  size_t inputPosition_ = 0;
+  size_t inputLength_ = 0;
+  bool sourceEnded_ = false;
+  bool lineEnded_ = false;
+  bool allocationFailed_ = false;
   State state_ = State::Uninitialized;
   size_t lineLength_ = 0;
   size_t receivedBytes_ = 0;

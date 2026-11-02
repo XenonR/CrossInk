@@ -23,6 +23,8 @@ struct TestStorage {
   bool failWrite = false, failSync = false, failClose = false;
   bool failRename = false;
   std::string failSyncPath;
+  std::string failOpenPath, failReadPath, failWritePath, failClosePath, failRemovePath;
+  int failOpenFlags = -1;
   bool operation() {
     if (captureCheckpoints) checkpoints.push_back(files);
     if (failAfter < 0) return true;
@@ -36,6 +38,10 @@ struct TestStorage {
   bool exists(const char* path) const { return files.contains(path); }
   bool remove(const char* path) {
     if (!operation() || handles[path]) return false;
+    if (failRemovePath == path) {
+      failRemovePath.clear();
+      return false;
+    }
     return files.erase(path) > 0;
   }
   bool rename(const char* from, const char* to) {
@@ -84,6 +90,10 @@ class HalFile {
   }
   int read(void* out, size_t n) {
     if (!*this || !Storage.operation() || pos_ > size()) return -1;
+    if (Storage.failReadPath == path_) {
+      Storage.failReadPath.clear();
+      return -1;
+    }
     n = std::min(n, size() - pos_);
     Storage.bytesRead += n;
     if (n) memcpy(out, Storage.files[path_].data() + pos_, n);
@@ -92,6 +102,10 @@ class HalFile {
   }
   size_t write(const void* data, size_t n) {
     if (!*this || !Storage.operation()) return 0;
+    if (Storage.failWritePath == path_) {
+      Storage.failWritePath.clear();
+      return 0;
+    }
     if (Storage.failWrite) {
       Storage.failWrite = false;
       if (n) --n;
@@ -113,7 +127,10 @@ class HalFile {
   bool close() {
     if (!*this) return false;
     --Storage.handles[path_];
+    const bool pathFailure = Storage.failClosePath == path_;
+    if (pathFailure) Storage.failClosePath.clear();
     path_.clear();
+    if (pathFailure) return false;
     if (std::exchange(Storage.failClose, false)) return false;
     return Storage.operation();
   }
@@ -121,6 +138,10 @@ class HalFile {
 inline HalFile TestStorage::open(const char* path, int flags) {
   ++openCalls;
   if (!operation() || handles[path]) return {};
+  if (failOpenPath == path && (failOpenFlags < 0 || failOpenFlags == flags)) {
+    failOpenPath.clear();
+    return {};
+  }
   if (!exists(path)) {
     if (!(flags & O_CREAT)) return {};
     files[path] = {};

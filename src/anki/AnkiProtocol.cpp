@@ -120,22 +120,35 @@ struct Input {
 
 PullDecoder::PullDecoder() : document_(&arena_) {}
 
-bool PullDecoder::Arena::initialize() {
-  if (storage_) return true;
-  // A 128 KiB parse arena belongs to the activity, not its small task stack.
+bool PullDecoder::Arena::initialize(const size_t capacity) {
+  if (storage_ && capacity_ >= capacity) return true;
+  release();
+  // The bounded arena is activity-owned, reused for every record, and too
+  // large for the worker stack. S3 profiles keep parsing out of internal RAM.
 #if defined(ARDUINO_ARCH_ESP32) && !defined(SIMULATOR)
-  storage_ = makeAlignedByteBufferNoThrow(ARENA_BYTES, MemoryPool::Psram);
+#if defined(FREEINK_FB_PSRAM) && FREEINK_FB_PSRAM
+  storage_ = makeAlignedByteBufferNoThrow(capacity, MemoryPool::Psram);
 #else
-  storage_ = makeAlignedByteBufferNoThrow(ARENA_BYTES);
+  storage_ = makeAlignedByteBufferNoThrow(capacity, MemoryPool::Internal);
 #endif
+#else
+  storage_ = makeAlignedByteBufferNoThrow(capacity);
+#endif
+  if (storage_) capacity_ = capacity;
   return static_cast<bool>(storage_);
+}
+
+void PullDecoder::Arena::release() {
+  storage_.reset();
+  capacity_ = used_ = 0;
 }
 
 void* PullDecoder::Arena::allocate(const size_t size) {
   constexpr size_t alignment = alignof(std::max_align_t);
-  if (size > ARENA_BYTES || used_ > ARENA_BYTES - sizeof(AllocationHeader)) return nullptr;
+  if (size > capacity_ || capacity_ < sizeof(AllocationHeader) || used_ > capacity_ - sizeof(AllocationHeader))
+    return nullptr;
   const size_t capacity = (size + alignment - 1) & ~(alignment - 1);
-  if (capacity > ARENA_BYTES - used_ - sizeof(AllocationHeader)) return nullptr;
+  if (capacity > capacity_ - used_ - sizeof(AllocationHeader)) return nullptr;
   auto* header = reinterpret_cast<AllocationHeader*>(storage_.get() + used_);
   header->size = size;
   header->capacity = capacity;
@@ -170,42 +183,43 @@ bool PullDecoder::fail(const char* message) {
   return false;
 }
 
-bool PullDecoder::initialize(const PullCallbacks callbacks) {
+bool PullDecoder::initialize(const PullCallbacks callbacks, const PullLimits limits) {
   document_.clear();
-  arena_.reset();
-  if (!arena_.initialize()) return fail("Could not allocate Anki parser arena");
-  if (!line_) {
-    // Unicode deck metadata can exceed 400 KiB; allocate this once in PSRAM.
-#if defined(ARDUINO_ARCH_ESP32) && !defined(SIMULATOR)
-    line_ = makePsramByteBufferNoThrow(MAX_LINE_BYTES + 1);
-#else
-    line_ = makeHeapByteBufferNoThrow(MAX_LINE_BYTES + 1);
-#endif
-    if (!line_) return fail("Could not allocate Anki download buffer");
-  }
+  arena_.release();
   callbacks_ = callbacks;
+  limits_ = limits;
+  source_ = {};
   state_ = State::Meta;
+  inputPosition_ = inputLength_ = 0;
+  sourceEnded_ = lineEnded_ = false;
+  allocationFailed_ = false;
   lineLength_ = receivedBytes_ = 0;
   expectedCount_ = cardCount_ = 0;
   version_ = 0;
   generation_[0] = '\0';
   error_ = "";
+  if (!limits.maxCards || limits.maxCards > MAX_CARDS || !limits.maxSideBytes || limits.maxSideBytes > MAX_SIDE_BYTES ||
+      !limits.arenaBytes || limits.arenaBytes > FULL_PULL_LIMITS.arenaBytes)
+    return fail("Invalid Anki download limits");
   return true;
 }
 
 bool PullDecoder::parseJson(const char* data, const size_t length) {
-  if (!line_ || !data || !length || length > MAX_LINE_BYTES || memchr(data, '\0', length))
+  constexpr size_t CONTROL_ARENA_BYTES = 8 * 1024;
+  constexpr size_t MAX_CONTROL_BYTES = 16 * 1024;
+  allocationFailed_ = false;
+  if (state_ == State::Uninitialized || !data || !length || length > MAX_CONTROL_BYTES || memchr(data, '\0', length))
     return fail("Invalid Anki JSON record size");
   document_.clear();
   arena_.reset();
-  JsonDocument filter(&arena_);
-  static constexpr const char* fields[] = {
-      "type",  "status", "protocol_version", "pull_id",  "server_time", "card_count", "id", "deck_id", "deck_name",
-      "front", "back",   "collection_ready", "batch_id", "processed",   "rejected"};
-  for (const char* field : fields) filter[field] = true;
+  if (!arena_.initialize(CONTROL_ARENA_BYTES)) {
+    allocationFailed_ = true;
+    return fail("Could not allocate Anki control parser arena");
+  }
   Input input{data, length};
-  const auto parsed =
-      deserializeJson(document_, input, DeserializationOption::Filter(filter), DeserializationOption::NestingLimit(8));
+  // Control responses are already byte-bounded. Skipping the filter avoids a
+  // second JSON document and keeps their shared workspace within 8 KiB.
+  const auto parsed = deserializeJson(document_, input, DeserializationOption::NestingLimit(8));
   if (parsed || document_.overflowed()) return fail("Invalid or oversized Anki JSON record");
   if (!document_.is<JsonObject>()) return fail("Anki JSON record must be an object");
   while (input.position < length) {
@@ -214,23 +228,105 @@ bool PullDecoder::parseJson(const char* data, const size_t length) {
   return true;
 }
 
-bool PullDecoder::processLine() {
-  if (!lineLength_) return true;
-  const char* text = reinterpret_cast<const char*>(line_.get());
-  bool empty = true;
-  for (size_t i = 0; i < lineLength_; ++i) empty = empty && whitespace(text[i]);
-  if (empty) {
-    lineLength_ = 0;
-    return true;
+int PullDecoder::LineInput::read() {
+  if (first >= 0) {
+    const int value = first;
+    first = -1;
+    return value;
   }
-  if (!parseJson(text, lineLength_)) return false;
-  lineLength_ = 0;
+  return decoder.readLineByte();
+}
+
+size_t PullDecoder::LineInput::readBytes(char* output, const size_t length) {
+  size_t count = 0;
+  while (count < length) {
+    const int value = read();
+    if (value < 0) break;
+    output[count++] = static_cast<char>(value);
+  }
+  return count;
+}
+
+int PullDecoder::readByte() {
+  if (state_ == State::Failed || sourceEnded_) return -1;
+  if (source_.cancelled && source_.cancelled(source_.context)) {
+    fail("Anki download cancelled");
+    return -1;
+  }
+  if (inputPosition_ == inputLength_) {
+    const int count = source_.read(source_.context, input_, sizeof(input_));
+    if (count < 0 || static_cast<size_t>(count) > sizeof(input_)) {
+      fail("Could not read Anki download");
+      return -1;
+    }
+    if (!count) {
+      sourceEnded_ = true;
+      return -1;
+    }
+    inputPosition_ = 0;
+    inputLength_ = static_cast<size_t>(count);
+  }
+  if (receivedBytes_ == MAX_PULL_BYTES) {
+    fail("Anki download exceeds size limit");
+    return -1;
+  }
+  ++receivedBytes_;
+  const int value = input_[inputPosition_++];
+  if (!value) {
+    fail("Anki download contains a null byte");
+    return -1;
+  }
+  return value;
+}
+
+int PullDecoder::readLineByte() {
+  if (lineEnded_) return -1;
+  const int value = readByte();
+  if (value < 0) return -1;
+  if (value == '\n') {
+    lineEnded_ = true;
+    return -1;
+  }
+  if (lineLength_ == MAX_LINE_BYTES) {
+    fail("Anki JSON line exceeds size limit");
+    return -1;
+  }
+  ++lineLength_;
+  return value;
+}
+
+bool PullDecoder::parseLine(const int first) {
+  document_.clear();
+  arena_.reset();
+  if (!arena_.initialize(limits_.arenaBytes)) {
+    allocationFailed_ = true;
+    return fail("Could not allocate Anki download parser arena");
+  }
+  JsonDocument filter(&arena_);
+  static constexpr const char* fields[] = {
+      "type",  "status", "protocol_version", "pull_id",  "server_time", "card_count", "id", "deck_id", "deck_name",
+      "front", "back",   "collection_ready", "batch_id", "processed",   "rejected"};
+  for (const char* field : fields) filter[field] = true;
+  LineInput input{*this, first};
+  const auto parsed =
+      deserializeJson(document_, input, DeserializationOption::Filter(filter), DeserializationOption::NestingLimit(8));
+  if (state_ == State::Failed) return false;
+  if (parsed || document_.overflowed()) return fail("Invalid or oversized Anki JSON record");
+  if (!document_.is<JsonObject>()) return fail("Anki JSON record must be an object");
+  int value;
+  while ((value = input.read()) >= 0) {
+    if (!whitespace(static_cast<char>(value))) return fail("Trailing data in Anki JSON record");
+  }
+  return state_ != State::Failed;
+}
+
+bool PullDecoder::processRecord() {
   const JsonVariantConst type = document_["type"];
   if (state_ == State::Meta) {
     JsonString generation;
     if (!equals(type, "meta") || !equals(document_["status"], "success") ||
         !supportedVersion(document_["protocol_version"], version_) || !document_["card_count"].is<unsigned>() ||
-        document_["card_count"].as<unsigned>() > MAX_CARDS ||
+        document_["card_count"].as<unsigned>() > limits_.maxCards ||
         !stringValue(document_["pull_id"], MAX_GENERATION_BYTES, generation) ||
         !boundedAscii(generation.c_str(), generation.size(), MAX_GENERATION_BYTES))
       return fail("Unsupported or invalid Anki download metadata");
@@ -255,7 +351,8 @@ bool PullDecoder::processLine() {
   JsonString deckName, front, back;
   if (!positiveId(document_["id"], card.cardId) || !positiveId(document_["deck_id"], card.deckId) ||
       !stringValue(document_["deck_name"], MAX_DECK_NAME_BYTES, deckName) || !deckName.size() ||
-      !stringValue(document_["front"], MAX_SIDE_BYTES, front) || !stringValue(document_["back"], MAX_SIDE_BYTES, back))
+      !stringValue(document_["front"], limits_.maxSideBytes, front) ||
+      !stringValue(document_["back"], limits_.maxSideBytes, back))
     return fail("Invalid or oversized Anki card content");
   card.deckName = deckName.c_str();
   card.front = front.c_str();
@@ -267,30 +364,29 @@ bool PullDecoder::processLine() {
   return true;
 }
 
-bool PullDecoder::feed(const uint8_t* data, const size_t length) {
-  if (state_ == State::Uninitialized || state_ == State::Failed || state_ == State::Finished) return false;
-  if ((!data && length) || length > MAX_PULL_BYTES - receivedBytes_) return fail("Anki download exceeds size limit");
-  receivedBytes_ += length;
-  for (size_t i = 0; i < length; ++i) {
-    const char value = static_cast<char>(data[i]);
-    if (state_ == State::Ended) {
-      if (!whitespace(value)) return fail("Unexpected data after Anki download end");
-      continue;
-    }
-    if (value == '\n') {
-      if (!processLine()) return false;
-      continue;
-    }
-    if (lineLength_ == MAX_LINE_BYTES) return fail("Anki JSON line exceeds size limit");
-    line_.get()[lineLength_++] = static_cast<uint8_t>(value);
+bool PullDecoder::decode(const PullSource source) {
+  allocationFailed_ = false;
+  if (state_ != State::Meta) return false;
+  if (!source.read) return fail("Missing Anki download reader");
+  source_ = source;
+  while (!sourceEnded_ && state_ != State::Ended) {
+    lineLength_ = 0;
+    lineEnded_ = false;
+    int first;
+    do {
+      first = readLineByte();
+    } while (first >= 0 && whitespace(static_cast<char>(first)));
+    if (state_ == State::Failed) return false;
+    if (first < 0) continue;  // Blank line or clean EOF.
+    if (!parseLine(first) || !processRecord()) return false;
   }
-  return true;
-}
-
-bool PullDecoder::finish() {
-  if (state_ == State::Failed || state_ == State::Uninitialized || state_ == State::Finished) return false;
-  if (lineLength_ && !processLine()) return false;
+  if (state_ == State::Failed) return false;
   if (state_ != State::Ended) return fail("Anki download ended before its end record");
+  int value;
+  while ((value = readByte()) >= 0) {
+    if (!whitespace(static_cast<char>(value))) return fail("Unexpected data after Anki download end");
+  }
+  if (state_ == State::Failed) return false;
   if (!callbacks_.onEnd || !callbacks_.onEnd(callbacks_.context)) return fail("Could not finish Anki snapshot");
   state_ = State::Finished;
   return true;

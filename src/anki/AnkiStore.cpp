@@ -103,10 +103,9 @@ struct AnkiStore::ImportState {
   char generation[MAX_GENERATION_BYTES + 1] = {};
   uint16_t expected = 0, count = 0, decks = 0;
   uint32_t end = 0;
-  // At most 16 KiB of import-only identity metadata. Avoid quadratic SD scans;
-  // allocate once on the heap, never on the small activity/task stack.
-  int64_t cardIds[MAX_CARDS] = {};
-  int64_t deckIds[MAX_DECKS] = {};
+  // One import-only array: count card IDs followed by at most count deck IDs.
+  // Allocate once off the task stack: 4,000 bytes at 250 cards, 16,000 at 1,000.
+  std::unique_ptr<int64_t[]> identities;
 };
 
 AnkiStore::AnkiStore() = default;
@@ -200,6 +199,14 @@ bool AnkiStore::beginSnapshot(const char* generation, uint16_t count) {
     LOG_ERR("ANKI", "Cannot allocate import metadata");
     return false;
   }
+  if (count) {
+    import_->identities = makeUniqueNoThrow<int64_t[]>(size_t(count) * 2);
+    if (!import_->identities) {
+      LOG_ERR("ANKI", "Cannot allocate %u-byte import identities", unsigned(size_t(count) * 2 * sizeof(int64_t)));
+      import_.reset();
+      return false;
+    }
+  }
   memcpy(import_->generation, generation, strlen(generation) + 1);
   import_->expected = count;
   import_->end = HEADER_BYTES + count * (CARD_BYTES + DECK_BYTES);
@@ -228,17 +235,17 @@ bool AnkiStore::appendCard(const CardInput& card) {
   }
   auto& state = *import_;
   for (uint16_t i = 0; i < state.count; ++i) {
-    if (state.cardIds[i] == card.cardId) {
+    if (state.identities[i] == card.cardId) {
       LOG_ERR("ANKI", "Duplicate card ID");
       return false;
     }
   }
   uint16_t deck = 0;
-  while (deck < state.decks && state.deckIds[deck] != card.deckId) ++deck;
+  while (deck < state.decks && state.identities[state.expected + deck] != card.deckId) ++deck;
   // Reusable, at-most-256-byte stack record, not a retained deck collection.
   uint8_t record[DECK_BYTES] = {};
   if (deck == state.decks) {
-    state.deckIds[state.decks++] = card.deckId;
+    state.identities[state.expected + state.decks++] = card.deckId;
     put64(record, card.deckId);
     put16(record + 10, strlen(card.deckName));
     memcpy(record + 12, card.deckName, strlen(card.deckName));
@@ -273,7 +280,7 @@ bool AnkiStore::appendCard(const CardInput& card) {
     return false;
   }
   state.end += card.frontLength + card.backLength;
-  state.cardIds[state.count++] = card.cardId;
+  state.identities[state.count++] = card.cardId;
   return true;
 }
 

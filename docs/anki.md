@@ -110,16 +110,42 @@ replays an uncertain upload.
 
 ## Bounds and storage
 
-Transfer allocations are bounded: a 512 KiB record buffer and 128 KiB JSON arena
-in PSRAM. Metadata can exceed 400 KiB for 1,000 unusually named decks. Card sides
-are bounded to 16 KiB decoded UTF-8 bytes, snapshots to 1,000 cards/decks and
-64 MiB wire bytes. Oversized desktop settings fail without replacing installed
-content. Review screens need one side buffer, a 125-byte completion bitmap,
-small pagination state and a fallible `uint32_t` queue array of at most 4,000
-bytes for 1,000 cards. The array is reused throughout a review and freed when
-the store closes; fixed queue fields and allocator overhead are additional.
-Home and sync do not allocate the array. It uses the default allocator, which
-prefers internal RAM for this size on X4 Pro. There is no second framebuffer.
+New downloads use fixed device limits:
+
+| Device | Cards per download | Decoded UTF-8 bytes per side | Pull parser arena |
+| --- | ---: | ---: | ---: |
+| Original X3/X4 (ESP32-C3) | 250 | 4,096 | 32 KiB internal RAM |
+| Sticky, X4 Classic, X4 Pro (ESP32-S3) | 1,000 | 16,384 | 128 KiB PSRAM |
+
+These are byte limits, not character limits. The desktop add-on's
+`max_text_chars` setting counts characters; its default 4,096 characters can
+exceed the C3's 4,096-byte limit for non-ASCII text. Lower that desktop setting
+if necessary (1,024 characters fits the byte limit even for four-byte UTF-8).
+Firmware rejects an oversized batch without truncating text or replacing the
+installed cards. The C3 requests `max_total=250`; all devices keep the existing
+250-card per-deck request limit.
+
+Pull data first goes to `/.crossink-anki/pull.tmp`. Only a complete HTTP 200
+response with checked SD write/sync/close is parsed. The HTTP client, upload
+workspace and 8 KiB control-response arena are released before the pull arena
+and import identities are allocated. ArduinoJson reads through a reusable
+512-byte input buffer; no complete JSON line is retained. Metadata over 400 KiB
+is skipped through the existing JSON filter. The hard bounds remain 512 KiB per
+record and 64 MiB per transfer, including ignored metadata. Import identities
+use 16 bytes per incoming card: 4,000 bytes at 250 cards, 16,000 at 1,000.
+These allocation sizes exclude file handles, allocator overhead, Wi-Fi and TLS.
+
+`pull.tmp` is disposable scratch, never a resumable or installed snapshot.
+Failures cancel the staged import and attempt scratch cleanup. If cleanup or
+power fails, the next sync truncates the scratch file before receiving data.
+Allow SD room for the raw download and staged snapshot alongside installed data.
+
+Stored snapshots retain their 1,000-card/16 KiB-side limits across devices; a
+card downloaded on S3 remains readable after moving its SD card to C3. Review
+screens retain one side buffer, a 125-byte completion bitmap, small pagination
+state and a fallible `uint32_t` queue array of at most 4,000 bytes. The array is
+reused throughout a review and freed when the store closes; Home and sync do not
+allocate it. There is no second framebuffer and no storage-format migration.
 
 `/.crossink-anki/` is persistent application data, separate from reading caches.
 An immutable binary snapshot contains its own card index and deck directory.
@@ -212,7 +238,7 @@ Backward paging still rebuilds preceding pages instead of allocating a page
 history. Contextual text measurement is retained for kerning and shaping.
 The 512 KiB line buffer and 128 KiB JSON arena remain in PSRAM, since shrinking
 them could reject supported Unicode deck metadata. No second framebuffer is
-allocated. Anki stays disabled on the C3 and Sticky environments.
+allocated. At that historical baseline, Anki was disabled on C3 and Sticky.
 
 Remaining boundaries are explicit: the desktop add-on cannot prove collection
 identity or exactly-once application after a lost receipt, so uncertain uploads

@@ -8,6 +8,7 @@
 
 ### Changed
 
+- Stage Anki downloads on SD before parsing, removing the large in-memory record buffer and bounding sync workspaces for devices without PSRAM.
 - Reduce Anki sync memory use and repeated SD reads, and reuse card pagination when moving between rating buttons.
 - Remove the "Repeat deck" subtitle from completed Anki decks; select a deck to see the repeat option.
 - Remove redundant Anki card-count subtitles; deck totals remain in the existing progress counter.

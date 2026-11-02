@@ -1275,6 +1275,7 @@ TEST_F(StoreTest, ReviewScheduleIsAllocatedOnlyOnDemandAndReusedUntilClose) {
   anki::AnkiStore store;
   ASSERT_TRUE(store.open());
   ASSERT_TRUE(installSingleDeck(store, anki::MAX_CARDS));
+  anki_test_memory::reset();
   EXPECT_EQ(anki_test_memory::arrayAllocationCalls, 0U);
   ASSERT_TRUE(store.beginReview(1));
   EXPECT_EQ(anki_test_memory::arrayAllocationCalls, 1U);
@@ -1362,5 +1363,31 @@ TEST_F(StoreTest, InvalidOrUncertainReviewSessionsCannotSelectCards) {
   ASSERT_TRUE(store.markUploadAttempted(batch.batchId));
   EXPECT_FALSE(store.beginReview(1));
   EXPECT_FALSE(store.nextReviewCard(card));
+}
+TEST_F(StoreTest, ImportIdentitiesMatchIncomingCountAndEmptyImportsAllocateNone) {
+  anki::AnkiStore store;
+  ASSERT_TRUE(store.open());
+  ASSERT_TRUE(store.beginSnapshot("empty", 0));
+  EXPECT_EQ(anki_test_memory::arrayAllocationCalls, 0U);
+  store.cancelSnapshot();
+  ASSERT_TRUE(store.beginSnapshot("small", 250));
+  EXPECT_EQ(anki_test_memory::arrayAllocationCalls, 1U);
+  EXPECT_EQ(anki_test_memory::lastArrayBytes, 4000U);
+  store.cancelSnapshot();
+  ASSERT_TRUE(store.beginSnapshot("large", anki::MAX_CARDS));
+  EXPECT_EQ(anki_test_memory::arrayAllocationCalls, 2U);
+  EXPECT_EQ(anki_test_memory::lastArrayBytes, 16000U);
+}
+
+TEST_F(StoreTest, ImportIdentityAllocationFailurePreservesInstalledSnapshot) {
+  anki::AnkiStore store;
+  ASSERT_TRUE(store.open());
+  ASSERT_TRUE(install(store));
+  anki_test_memory::failNextArray = true;
+  EXPECT_FALSE(store.beginSnapshot("replacement", 250));
+  ASSERT_TRUE(store.open());
+  EXPECT_STREQ(store.generation(), "generation-one");
+  EXPECT_EQ(store.cardCount(), 3);
+  for (const auto& [path, handles] : Storage.handles) EXPECT_EQ(handles, 0) << path;
 }
 }  // namespace
