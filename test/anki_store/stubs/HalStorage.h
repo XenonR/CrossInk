@@ -25,6 +25,7 @@ struct TestStorage {
   std::string failSyncPath;
   std::string failOpenPath, failReadPath, failWritePath, failClosePath, failRemovePath;
   int failOpenFlags = -1;
+  int failCloseFlags = -1;
   bool operation() {
     if (captureCheckpoints) checkpoints.push_back(files);
     if (failAfter < 0) return true;
@@ -127,7 +128,8 @@ class HalFile {
   bool close() {
     if (!*this) return false;
     --Storage.handles[path_];
-    const bool pathFailure = Storage.failClosePath == path_;
+    const bool pathFailure =
+        Storage.failClosePath == path_ && (Storage.failCloseFlags < 0 || Storage.failCloseFlags == flags_);
     if (pathFailure) Storage.failClosePath.clear();
     path_.clear();
     if (pathFailure) return false;

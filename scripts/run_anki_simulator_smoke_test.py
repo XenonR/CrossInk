@@ -16,7 +16,7 @@ import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from run_simulator_smoke_test import CRASH_PATTERNS, DEFAULT_BOOK, ROOT
 
@@ -24,9 +24,10 @@ from run_simulator_smoke_test import CRASH_PATTERNS, DEFAULT_BOOK, ROOT
 class AnkiServer(ThreadingHTTPServer):
     """Local contract fixture; never connects to or changes a real collection."""
 
-    def __init__(self, version: int):
+    def __init__(self, version: int, max_total: int):
         super().__init__(("127.0.0.1", 0), AnkiHandler)
         self.version = version
+        self.max_total = max_total
         self.generation = f"anki-smoke-empty-p{version}"
         self.requests: list[tuple[str, str]] = []
         self.batches: list[str] = []
@@ -82,6 +83,10 @@ class AnkiHandler(BaseHTTPRequestHandler):
         if not self.require(self.headers.get("Authorization") == "Bearer anki-smoke-token", "Missing pull token"):
             return
         if not self.require(self.headers.get("Accept") == "application/x-ndjson", "Missing NDJSON accept header"):
+            return
+        if not self.require(parse_qs(urlparse(self.path).query) ==
+                            {"max_cards": ["250"], "max_total": [str(self.server.max_total)]},
+                            "Pull limit does not match the selected device"):
             return
         records = [{"type": "meta", "status": "success", "protocol_version": self.server.version,
                     "pull_id": self.server.generation, "card_count": 0}, {"type": "end", "card_count": 0}]
@@ -193,7 +198,8 @@ def main() -> int:
                 result = run_phase(program, root, env, phase, args.timeout)
                 if result:
                     return result
-            server = AnkiServer(version)
+            max_total = 250 if args.env in ("simulator", "simulator-X3") else 1000
+            server = AnkiServer(version, max_total)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             env["CROSSINK_SIMULATOR_ANKI_SERVER"] = f"http://127.0.0.1:{server.server_port}"

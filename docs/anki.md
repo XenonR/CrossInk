@@ -56,6 +56,11 @@ page mappings do not change the direction of rating selection.
 6. Sync again to upload all saved ratings and replace the batch with Desktop's
    current due cards. There is no automatic or background synchronization.
 
+During response-body transfer, cancellation is checked at five-second read polls;
+thirty seconds without data fails the request without replaying it. Connection
+establishment and response headers can still wait for the existing 75-second
+timeout. SD parsing also checks cancellation and yields between buffered reads.
+
 If an upload needs attention, open its recovery action to write a readable
 `recovery-<batch-id>.ndjson` report under `/.crossink-anki/`. Check those ratings
 in Anki Desktop and manually handle any missing ones before choosing **Handled
@@ -252,6 +257,30 @@ heap/PSRAM/stack margins still need the acceptance checks below.
 
 ## Validation and release acceptance
 
+### All-device validation (2026-11-02)
+
+- All 1,062 native CTest cases pass, including 154 Anki cases. All 154 Anki
+  cases also pass AddressSanitizer and UndefinedBehaviorSanitizer with leak
+  detection disabled.
+- All five native profiles build: `simulator`, `simulator-X3`, `sticky-simulator`,
+  `x4-classic-simulator`, and `x4-pro-simulator`. Each passes protocols 2 and 3
+  in English/small and German/large: 20 scenarios across 80 process phases.
+  The fixture checks the actual C3/S3 pull limits, ordered reviews, durable
+  retry/repeat state, physical rating aliases and unchanged upload receipts.
+- Release firmware builds pass for `default`, `sticky`, `x4-classic`, and
+  `x4-pro`, including size and app touch-capability audits.
+- Broad app/EPUB smoke tests pass on the original button simulator and X4 Pro.
+- Direct cppcheck 2.11 reports no defects in all nine Anki/activity/HTTP source
+  files for resolved C3 and S3 defines, using the repository analysis flags.
+  Direct invocation avoids `pio check` regenerating SDK build metadata during
+  the multi-device firmware build.
+- Linux native builds use the same GCC/OpenSSL compatibility flags as the
+  existing personal simulator overrides. The additional profiles were built
+  with a temporary config and isolated build directory; `platformio.local.ini`
+  and the SDK submodule are unchanged.
+- Hardware heap/PSRAM/stack margins, physical SD power cuts, and live Desktop
+  synchronization remain unverified. Use the physical acceptance checks below.
+
 ### Learning queue regression results (2026-11-01)
 
 - All 1,036 native CTest cases pass, including 128 Anki cases. The 128 also pass
@@ -375,6 +404,20 @@ isolated temporary SD directory and does not contact a real collection.
 
 ### Firmware size
 
+All-device images built on 2026-11-02 fit the 6,553,600-byte OTA app partition:
+
+| Device | Firmware binary bytes | Partition space remaining |
+| --- | ---: | ---: |
+| Original X3/X4 | 6,386,608 | 166,992 |
+| Sticky | 5,561,792 | 991,808 |
+| X4 Classic | 5,517,520 | 1,036,080 |
+| X4 Pro | 5,652,432 | 901,168 |
+
+These are actual `firmware.bin` file sizes, including padding. They measure
+flash storage, not runtime heap/PSRAM or task-stack margins.
+
+Historical X4 Pro comparison:
+
 The app partition is 0x640000 bytes (6,553,600 bytes). Release images built with
 the same toolchain on 2026-10-31 measure:
 
@@ -423,11 +466,15 @@ frontlight checks apply only where the device supports them:
    export the SD report, reconcile in Desktop, and use **Handled in Anki Desktop**.
    Check that uncertain events are retained and never automatically replayed.
 4. Repeat review/sync/exit cycles while recording internal free heap and largest
-   allocatable block, PSRAM free/largest block and the sync worker stack margin
+   allocatable block before Wi-Fi, during upload/download, and during SD import.
+   On S3 also record PSRAM free/largest block; inspect the sync worker stack margin
    (`ANKI` completion log). Simulator heap/stack placeholders are not measurements.
-   Include a 1,000-card deck and repeated review entry/exit to check the at-most
-   4,000-byte queue allocation is released and heap/stack margins remain safe.
-5. Exit to EPUB reading, use frontlight and Home, then enter/leave USB Drive.
+   Download 250 cards with 4 KiB sides on C3 and 1,000 with 16 KiB sides on S3.
+   Move an S3 snapshot to C3 to verify the unchanged stored-card limits. Repeat
+   review entry/exit to check the at-most-4,000-byte queue allocation is released.
+   Select all four ratings with front and side buttons, including swapped page
+   mappings, and verify long questions/answers still page outside rating selection.
+5. Exit to EPUB reading; exercise frontlight, Home, and USB Drive where supported.
    No EPUB cache reset is required by this feature. Keep `/.crossink-anki/` intact
    while investigating recovery; it contains review evidence, not a reading cache.
 

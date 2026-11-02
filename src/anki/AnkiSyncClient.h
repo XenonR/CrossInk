@@ -51,7 +51,7 @@ class AnkiSyncClient {
   std::unique_ptr<PullDecoder> decoder_;
   std::unique_ptr<UploadBatch> batch_;
   HeapByteBuffer body_;
-  std::unique_ptr<char[]> response_;
+  HeapByteBuffer response_;
   PullCallbacks pullCallbacks_;
   PullLimits limits_ = DEVICE_PULL_LIMITS;
   bool importFailed_ = false;

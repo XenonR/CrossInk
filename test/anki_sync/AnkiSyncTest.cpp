@@ -355,8 +355,8 @@ TEST_F(SyncTest, OversizedConstrainedCardsRejectWholeImportAndPreservePreviousBa
 }
 
 TEST_F(SyncTest, ScratchStorageFailuresNeverPublishAndCloseEveryHandle) {
-  // The seven failure points cover both writers and readers of the same path.
-  for (int failure = 0; failure < 7; ++failure) {
+  // Cover both the writer and reader lifecycle for the same scratch path.
+  for (int failure = 0; failure < 8; ++failure) {
     SCOPED_TRACE(failure);
     Storage = {};
     ASSERT_TRUE(store.open());
@@ -384,6 +384,10 @@ TEST_F(SyncTest, ScratchStorageFailuresNeverPublishAndCloseEveryHandle) {
         break;
       case 6:
         Storage.failWritePath = "/.crossink-anki/cards.tmp";
+        break;
+      case 7:
+        Storage.failClosePath = SCRATCH;
+        Storage.failCloseFlags = O_RDONLY;
         break;
     }
     replies = {{"/health", HEALTH}, {C3_PULL, snapshot("replacement", 2)}};
@@ -413,11 +417,21 @@ TEST_F(SyncTest, StaleScratchIsTruncatedAndCleanupFailureCannotActivateItLater) 
 
 TEST_F(SyncTest, CancellationDuringScratchParsingDiscardsPartialImport) {
   install();
-  size_t beforeReads = Storage.bytesRead;
+  bool cancelledAfterCard = false;
   const anki::SyncCallbacks callbacks{
-      &beforeReads, [](void* context) { return Storage.bytesRead > *static_cast<size_t*>(context); }, nullptr};
+      &cancelledAfterCard,
+      [](void* context) {
+        // Reserved header/index space is followed by card text only after an
+        // append succeeds. Cancel after that point, not at the first read.
+        const auto staged = Storage.files.find("/.crossink-anki/cards.tmp");
+        if (staged == Storage.files.end() || staged->second.size() <= 128 + 40 * (40 + 256)) return false;
+        *static_cast<bool*>(context) = true;
+        return true;
+      },
+      nullptr};
   replies = {{"/health", HEALTH}, {FULL_PULL, snapshot("replacement", 40)}};
   EXPECT_EQ(client.run(CONNECTION, callbacks), anki::SyncResult::Cancelled);
+  EXPECT_TRUE(cancelledAfterCard);
   ASSERT_TRUE(store.open());
   EXPECT_STREQ(store.generation(), "old");
   EXPECT_FALSE(Storage.exists(SCRATCH));

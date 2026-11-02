@@ -578,6 +578,16 @@ HttpDownloader::DownloadError HttpDownloader::requestToken(const std::string& ur
     cleanup();
     return HTTP_ERROR;
   }
+#ifdef ESP_ERR_HTTP_EAGAIN
+  // Poll the existing transaction so cancellation does not wait for the full
+  // connection timeout. An idle response fails without replaying the request.
+  if (esp_http_client_set_timeout_ms(client, HTTP_READ_POLL_TIMEOUT_MS) != ESP_OK) {
+    LOG_ERR("HTTP", "Cannot set authenticated response read timeout");
+    cleanup();
+    return HTTP_ERROR;
+  }
+  uint32_t lastReadMs = millis();
+#endif
   size_t received = 0;
   while (true) {
     if (shouldCancel && shouldCancel()) {
@@ -586,6 +596,21 @@ HttpDownloader::DownloadError HttpDownloader::requestToken(const std::string& ur
     }
     const int bytes = esp_http_client_read(client, buffer.get(), DEFAULT_DOWNLOAD_BUFFER_SIZE);
     if (bytes < 0) {
+#ifdef ESP_ERR_HTTP_EAGAIN
+      if (bytes == -ESP_ERR_HTTP_EAGAIN) {
+        if (shouldCancel && shouldCancel()) {
+          cleanup();
+          return ABORTED;
+        }
+        if (millis() - lastReadMs >= DOWNLOAD_IDLE_TIMEOUT_MS) {
+          LOG_ERR("HTTP", "Authenticated response read timed out");
+          cleanup();
+          return HTTP_ERROR;
+        }
+        delay(1);
+        continue;
+      }
+#endif
       LOG_ERR("HTTP", "Authenticated response read failed");
       cleanup();
       return HTTP_ERROR;
@@ -598,6 +623,9 @@ HttpDownloader::DownloadError HttpDownloader::requestToken(const std::string& ur
       return FILE_ERROR;
     }
     received += static_cast<size_t>(bytes);
+#ifdef ESP_ERR_HTTP_EAGAIN
+    lastReadMs = millis();
+#endif
     delay(0);
   }
   const bool complete = esp_http_client_is_complete_data_received(client);

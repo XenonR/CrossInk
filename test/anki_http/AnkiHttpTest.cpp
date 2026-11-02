@@ -132,6 +132,78 @@ TEST_F(AnkiHttp, NegativeHeaderOrReadFailureIsNotRetried) {
   expectOneRequest();
 }
 
+TEST_F(AnkiHttp, ReadPollingPreservesTheConnectionAndHeaderTimeout) {
+  ASSERT_EQ(request(), Error::OK);
+  EXPECT_EQ(test_http::trace.config.timeout_ms, 75000);
+  EXPECT_EQ(test_http::trace.openTimeoutMs, 75000);
+  EXPECT_EQ(test_http::trace.headerTimeoutMs, 75000);
+  EXPECT_EQ(test_http::trace.timeoutCalls, 1);
+  EXPECT_EQ(test_http::trace.readTimeoutMs, 5000);
+  expectOneRequest();
+}
+
+TEST_F(AnkiHttp, TemporaryReadStallsDoNotResendThePostOrLoseResponseBytes) {
+  test_http::scenario.response = "abcdef";
+  test_http::scenario.declaredLength = 6;
+  test_http::scenario.readChunk = 2;
+  test_http::scenario.readResults = {-ESP_ERR_HTTP_EAGAIN, 2, -ESP_ERR_HTTP_EAGAIN,
+                                     -ESP_ERR_HTTP_EAGAIN, 2, -ESP_ERR_HTTP_EAGAIN};
+  EXPECT_EQ(request("/push", "test-token", "POST", "{}"), Error::OK);
+  EXPECT_EQ(received, "abcdef");
+  EXPECT_EQ(test_http::trace.body, "{}");
+  EXPECT_EQ(test_http::trace.writeCalls, 1);
+  expectOneRequest();
+}
+
+TEST_F(AnkiHttp, SuccessfulReadsResetTheIdleDeadline) {
+  test_http::scenario.response = "abcdef";
+  test_http::scenario.declaredLength = 6;
+  for (int chunk = 0; chunk < 3; ++chunk) {
+    for (int poll = 0; poll < 5; ++poll) test_http::scenario.readResults.push_back(-ESP_ERR_HTTP_EAGAIN);
+    test_http::scenario.readResults.push_back(2);
+  }
+  EXPECT_EQ(request(), Error::OK);
+  EXPECT_EQ(received, "abcdef");
+  EXPECT_GT(millis(), 75000U);
+  expectOneRequest();
+}
+
+TEST_F(AnkiHttp, ContinuousReadStallFailsAfterThirtySecondsWithoutResending) {
+  test_http::scenario.readResults.assign(6, -ESP_ERR_HTTP_EAGAIN);
+  EXPECT_EQ(request("/push", "test-token", "POST", "{}"), Error::HTTP_ERROR);
+  EXPECT_TRUE(received.empty());
+  EXPECT_EQ(test_http::trace.body, "{}");
+  EXPECT_EQ(test_http::trace.writeCalls, 1);
+  EXPECT_EQ(test_http::trace.readCalls, 6);
+  EXPECT_GE(millis(), 30000U);
+  EXPECT_LT(millis(), 35000U);
+  expectOneRequest();
+}
+
+TEST_F(AnkiHttp, CancellationDuringReadPollWinsEvenAtTheIdleDeadline) {
+  for (const uint32_t cancelAt : {5000U, 30000U}) {
+    SCOPED_TRACE(cancelAt);
+    test_http::reset();
+    test_http::scenario.readResults.assign(6, -ESP_ERR_HTTP_EAGAIN);
+    EXPECT_EQ(request("/push", "test-token", "POST", "{}", 64, [cancelAt] { return millis() >= cancelAt; }),
+              Error::ABORTED);
+    EXPECT_TRUE(received.empty());
+    EXPECT_EQ(test_http::trace.body, "{}");
+    EXPECT_EQ(test_http::trace.writeCalls, 1);
+    EXPECT_EQ(test_http::trace.readCalls, static_cast<int>(cancelAt / 5000U));
+    expectOneRequest();
+  }
+}
+
+TEST_F(AnkiHttp, ReadTimeoutSetupFailureCleansUpWithoutReadingOrRetrying) {
+  test_http::scenario.failTimeout = true;
+  EXPECT_EQ(request(), Error::HTTP_ERROR);
+  EXPECT_TRUE(received.empty());
+  EXPECT_EQ(test_http::trace.timeoutCalls, 1);
+  EXPECT_EQ(test_http::trace.readCalls, 0);
+  expectOneRequest();
+}
+
 TEST_F(AnkiHttp, CallbackCanAbortWithoutRetry) {
   int calls = 0;
   EXPECT_EQ(HttpDownloader::requestToken(

@@ -15,6 +15,14 @@ namespace anki {
 namespace {
 constexpr char PULL_PATH[] = "/.crossink-anki/pull.tmp";
 
+HeapByteBuffer makeTransferBuffer(const size_t bytes) {
+#if defined(ARDUINO_ARCH_ESP32) && !defined(SIMULATOR) && defined(FREEINK_FB_PSRAM) && FREEINK_FB_PSRAM
+  return makePsramByteBufferNoThrow(bytes);
+#else
+  return makeHeapByteBufferNoThrow(bytes);
+#endif
+}
+
 void logMemory(const char* phase) {
 #if defined(ARDUINO_ARCH_ESP32) && !defined(SIMULATOR)
   const auto internal = byteHeapSnapshot(MemoryPool::Internal);
@@ -30,14 +38,10 @@ void logMemory(const char* phase) {
 bool AnkiSyncClient::allocateControlBuffers() {
   // Reuse these bounded buffers for every upload batch, off the 4 KiB worker stack.
   if (!batch_) batch_ = makeUniqueNoThrow<UploadBatch>();
-  if (!body_) {
-#if defined(ARDUINO_ARCH_ESP32) && !defined(SIMULATOR) && defined(FREEINK_FB_PSRAM) && FREEINK_FB_PSRAM
-    body_ = makePsramByteBufferNoThrow(BODY_BYTES);
-#else
-    body_ = makeHeapByteBufferNoThrow(BODY_BYTES);
-#endif
-  }
-  if (!response_) response_ = makeUniqueNoThrow<char[]>(RESPONSE_BYTES);
+  // S3 buffers explicitly use PSRAM: exhausted PSRAM must not silently consume
+  // internal RAM needed by the network stack. C3 uses its ordinary byte heap.
+  if (!body_) body_ = makeTransferBuffer(BODY_BYTES);
+  if (!response_) response_ = makeTransferBuffer(RESPONSE_BYTES);
   if (!batch_ || !body_ || !response_) {
     LOG_ERR("ANKI", "Cannot allocate sync control workspace");
     return false;
@@ -93,6 +97,7 @@ SyncResult AnkiSyncClient::run(const Connection& connection, const SyncCallbacks
     decoder_->initialize(pullCallbacks_, limits_);
   }};
   auto* const body = reinterpret_cast<char*>(body_.get());
+  auto* const responseData = reinterpret_cast<char*>(response_.get());
   const auto cancelled = [&]() { return callbacks.cancelled && callbacks.cancelled(callbacks.context); };
   const auto phase = [&](const SyncPhase value) {
     if (callbacks.phaseChanged) callbacks.phaseChanged(callbacks.context, value);
@@ -100,9 +105,9 @@ SyncResult AnkiSyncClient::run(const Connection& connection, const SyncCallbacks
   size_t received = 0;
   const auto response = [&](const uint8_t* data, const size_t length) {
     if (length > RESPONSE_BYTES - 1 - received) return false;
-    memcpy(response_.get() + received, data, length);
+    memcpy(responseData + received, data, length);
     received += length;
-    response_[received] = '\0';
+    responseData[received] = '\0';
     return true;
   };
   int status = 0;
@@ -111,7 +116,7 @@ SyncResult AnkiSyncClient::run(const Connection& connection, const SyncCallbacks
                                              status, cancelled);
   if (result != HttpDownloader::OK) return cancelled() ? SyncResult::Cancelled : SyncResult::ConnectionError;
   Health health;
-  if (!decoder_->parseHealth(response_.get(), received, health) || !health.collectionReady) {
+  if (!decoder_->parseHealth(responseData, received, health) || !health.collectionReady) {
     LOG_ERR("ANKI", "Desktop health/protocol rejected: %s", decoder_->error());
     return decoder_->allocationFailed() ? SyncResult::StorageError : SyncResult::ProtocolError;
   }
@@ -134,7 +139,7 @@ SyncResult AnkiSyncClient::run(const Connection& connection, const SyncCallbacks
                                           cancelled);
     PushReceipt receipt;
     if (result != HttpDownloader::OK ||
-        !decoder_->parsePushReceipt(response_.get(), received, batch_->batchId, batch_->count, receipt) ||
+        !decoder_->parsePushReceipt(responseData, received, batch_->batchId, batch_->count, receipt) ||
         receipt.status != PushReceipt::Status::Success) {
       LOG_ERR("ANKI", "Review upload uncertain; retaining batch for reconciliation");
       if (!store_->markUploadUncertain(batch_->batchId)) return SyncResult::StorageError;

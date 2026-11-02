@@ -17,6 +17,7 @@
 ### Fixed
 
 - Select every Anki rating with front or side buttons, including swapped page-button mappings.
+- Keep stalled Anki response downloads cancellable, bound idle waits, and retain the installed cards when scratch-file reads or closes fail.
 - Make Anki Again and Hard repeat cards during offline review instead of completing them. Repeats target two and five intervening saved answers, survive restarts, and sync every rating to Anki Desktop; Good and Easy complete the cards.
 - Prevent rapid or held Anki button presses from acting on an unseen answer or next card.
 - Reject malformed Anki responses and connection files, discard failed card imports, and allow interrupted snapshot activation to retry safely while retaining review evidence.
