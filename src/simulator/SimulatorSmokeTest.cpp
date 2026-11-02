@@ -2889,22 +2889,19 @@ class AnkiSimulatorSmokeTest {
       return;
     }
     switch (step) {
-      case Step::Start:
-        if (!mappedInputManager.hasHomeKey() || !mappedInputManager.hasTouchHardware())
-          fail("Anki smoke requires the X4 Pro simulator");
-        {
-          RenderLock lock;
-          SETTINGS.uiTheme = CrossPointSettings::CLASSIC;
-          const char* scale = std::getenv("CROSSINK_SIMULATOR_ANKI_UI_SCALE");
-          SETTINGS.uiScale = scale && std::strcmp(scale, "large") == 0 ? CrossPointSettings::UI_SCALE_LARGE
-                                                                       : CrossPointSettings::UI_SCALE_SMALL;
-          const char* language = std::getenv("CROSSINK_SIMULATOR_ANKI_LANGUAGE");
-          const auto requestedLanguage = I18n::languageFromCode(language ? language : "EN");
-          I18N.setLanguage(requestedLanguage);
-          if (I18N.getLanguage() != requestedLanguage) fail("Requested Anki UI language is not built in");
-          SETTINGS.disableReaderTouchscreen = false;
-          UITheme::getInstance().reload();
-        }
+      case Step::Start: {
+        RenderLock lock;
+        SETTINGS.uiTheme = CrossPointSettings::CLASSIC;
+        const char* scale = std::getenv("CROSSINK_SIMULATOR_ANKI_UI_SCALE");
+        SETTINGS.uiScale = scale && std::strcmp(scale, "large") == 0 ? CrossPointSettings::UI_SCALE_LARGE
+                                                                     : CrossPointSettings::UI_SCALE_SMALL;
+        const char* language = std::getenv("CROSSINK_SIMULATOR_ANKI_LANGUAGE");
+        const auto requestedLanguage = I18n::languageFromCode(language ? language : "EN");
+        I18N.setLanguage(requestedLanguage);
+        if (I18N.getLanguage() != requestedLanguage) fail("Requested Anki UI language is not built in");
+        SETTINGS.disableReaderTouchscreen = false;
+        UITheme::getInstance().reload();
+      }
         if (std::strcmp(std::getenv("CROSSINK_SIMULATOR_ANKI_SMOKE"), "restart") == 0) {
           checkPending(5, 3);
           anki::AnkiStore store;
@@ -2987,7 +2984,7 @@ class AnkiSimulatorSmokeTest {
           RenderLock lock;
           if (!home->simulatorPrepareAnki(x, y)) fail("Home theme lacks Anki destination");
         }
-        if (x >= 0)
+        if (mappedInputManager.hasTouchHardware() && x >= 0)
           tap(x, y, Step::ThemeDecks);
         else
           button(MappedInputManager::Button::Confirm, Step::ThemeDecks);
@@ -3039,12 +3036,15 @@ class AnkiSimulatorSmokeTest {
       case Step::QuestionPrevious:
         checkLayout(true);
         if (review().simulatorState().pageNumber != 0) fail("Previous page did not return");
-        swipe(renderer.getScreenWidth() * 3 / 4, renderer.getScreenHeight() / 2, renderer.getScreenWidth() / 4,
-              renderer.getScreenHeight() / 2, Step::QuestionSwiped);
+        if (mappedInputManager.hasTouchHardware())
+          swipe(renderer.getScreenWidth() * 3 / 4, renderer.getScreenHeight() / 2, renderer.getScreenWidth() / 4,
+                renderer.getScreenHeight() / 2, Step::QuestionSwiped);
+        else
+          button(MappedInputManager::Button::Right, Step::QuestionSwiped);
         break;
       case Step::QuestionSwiped:
         checkLayout(true);
-        if (review().simulatorState().pageNumber != 1) fail("Swipe did not page");
+        if (review().simulatorState().pageNumber != 1) fail("Swipe or front button did not page");
         {
           RenderLock lock;
           renderer.setOrientation(GfxRenderer::LandscapeClockwise);
@@ -3095,40 +3095,44 @@ class AnkiSimulatorSmokeTest {
         checkLayout(true);
         checkCard(1);
         checkPending(1, 5);
-        tapAction(2, Step::HardAnswer);
+        activateCardAction(2, Step::HardAnswer);
         break;
       case Step::HardAnswer:
-        if (!review().simulatorState().answer) fail("Touch did not reveal answer");
-        mappedInputManager.simulatorInjectPress(MappedInputManager::Button::Confirm);
-        tapAction(4, Step::CardTwo);
+        if (!review().simulatorState().answer) fail("Action did not reveal answer");
+        if (mappedInputManager.hasTouchHardware())
+          mappedInputManager.simulatorInjectPress(MappedInputManager::Button::Confirm);
+        activateCardAction(4, Step::CardTwo);
         break;
       case Step::CardTwo:
         checkCard(2);
         checkPending(2, 5);
-        button(MappedInputManager::Button::Confirm, Step::CardTwoReleaseConsumed);
+        if (mappedInputManager.hasTouchHardware())
+          button(MappedInputManager::Button::Confirm, Step::CardTwoReleaseConsumed);
+        else
+          advance(Step::CardTwoReleaseConsumed);
         break;
       case Step::CardTwoReleaseConsumed:
         checkCard(2);
         button(MappedInputManager::Button::Confirm, Step::GoodAnswer);
         break;
       case Step::GoodAnswer:
-        tapAction(5, Step::RetryAgain);
+        activateCardAction(5, Step::RetryAgain);
         break;
       case Step::RetryAgain:
         checkCard(0);
         checkPending(3, 4);
-        tapAction(2, Step::RetryAgainAnswer);
+        activateCardAction(2, Step::RetryAgainAnswer);
         break;
       case Step::RetryAgainAnswer:
-        tapAction(3, Step::CardThree);
+        activateCardAction(3, Step::CardThree);
         break;
       case Step::CardThree:
         checkCard(3);
         checkPending(4, 4);
-        tapAction(2, Step::EasyAnswer);
+        activateCardAction(2, Step::EasyAnswer);
         break;
       case Step::EasyAnswer:
-        tapAction(6, Step::CardFour);
+        activateCardAction(6, Step::CardFour);
         break;
       case Step::CardFour:
         checkCard(4);
@@ -3145,7 +3149,7 @@ class AnkiSimulatorSmokeTest {
         if (blockedJournal.empty()) fail("Review journal missing");
         std::filesystem::rename(blockedJournal, blockedJournal.string() + ".blocked");
         std::filesystem::create_directory(blockedJournal);
-        tapAction(5, Step::SaveFailed);
+        activateCardAction(5, Step::SaveFailed);
         break;
       case Step::SaveFailed:
         if (!review().simulatorState().error || review().simulatorState().cardOrdinal != 4)
@@ -3168,8 +3172,11 @@ class AnkiSimulatorSmokeTest {
       case Step::RestartReview:
         checkCard(4);
         checkPending(5, 3);
-        swipe(renderer.getScreenWidth() / 2, 8, renderer.getScreenWidth() / 2, renderer.getScreenHeight() / 4,
-              Step::FrontlightOpened);
+        if (mappedInputManager.hasTouchHardware() && Frontlight.present())
+          swipe(renderer.getScreenWidth() / 2, 8, renderer.getScreenWidth() / 2, renderer.getScreenHeight() / 4,
+                Step::FrontlightOpened);
+        else
+          advance(Step::FrontlightReturned);
         break;
       case Step::FrontlightOpened:
         requireActivity("FrontlightPanel");
@@ -3189,10 +3196,10 @@ class AnkiSimulatorSmokeTest {
       case Step::RestartRetryAgain:
         checkCard(0);
         checkPending(6, 2);
-        tapAction(2, Step::RestartRetryAgainAnswer);
+        activateCardAction(2, Step::RestartRetryAgainAnswer);
         break;
       case Step::RestartRetryAgainAnswer:
-        tapAction(5, Step::RestartRetryHard);
+        activateCardAction(5, Step::RestartRetryHard);
         break;
       case Step::RestartRetryHard:
         checkCard(1);
@@ -3200,7 +3207,7 @@ class AnkiSimulatorSmokeTest {
         button(MappedInputManager::Button::Confirm, Step::RestartRetryHardAnswer);
         break;
       case Step::RestartRetryHardAnswer:
-        tapAction(5, Step::Completed);
+        activateCardAction(5, Step::Completed);
         break;
       case Step::Completed:
         if (!review().simulatorState().done) fail("Completed batch did not show completion");
@@ -3212,10 +3219,10 @@ class AnkiSimulatorSmokeTest {
       case Step::RepeatStarted:
         checkCard(0);
         checkPending(8, 5);
-        tapAction(2, Step::RepeatFirstAnswer);
+        activateCardAction(2, Step::RepeatFirstAnswer);
         break;
       case Step::RepeatFirstAnswer:
-        tapAction(3, Step::RepeatPartial);
+        activateCardAction(3, Step::RepeatPartial);
         break;
       case Step::RepeatPartial:
         checkCard(1);
@@ -3225,18 +3232,18 @@ class AnkiSimulatorSmokeTest {
       case Step::RestartDone:
         requireActivity("AnkiHome");
         checkPending(9, 5);
-        LOG_INF("ANKI-SMOKE",
-                "Anki simulator restart passed: persisted retries, frontlight, completion and physical repeat");
+        LOG_INF("ANKI-SMOKE", "Anki simulator restart passed: persisted retries, completion and physical repeat");
         std::_Exit(0);
       case Step::RepeatResumeReview:
         checkCard(1);
         checkPending(9, 5);
         repeatIndex = 0;
-        tapAction(2, Step::RepeatAnswer);
+        activateCardAction(2, Step::RepeatAnswer);
         break;
       case Step::RepeatAnswer:
-        if (repeatIndex == 6) mappedInputManager.simulatorInjectPress(MappedInputManager::Button::Confirm);
-        tapAction(kRepeatActions[repeatIndex], Step::RepeatNext);
+        if (repeatIndex == 6 && mappedInputManager.hasTouchHardware())
+          mappedInputManager.simulatorInjectPress(MappedInputManager::Button::Confirm);
+        activateCardAction(kRepeatActions[repeatIndex], Step::RepeatNext);
         break;
       case Step::RepeatNext:
         if (++repeatIndex < 7) {
@@ -3244,11 +3251,14 @@ class AnkiSimulatorSmokeTest {
           // retries before card 1. This catches bucket-draining regressions.
           checkCard(kRepeatOrdinals[repeatIndex]);
           checkPending(9 + repeatIndex, kRepeatRemaining[repeatIndex]);
-          tapAction(2, Step::RepeatAnswer);
+          activateCardAction(2, Step::RepeatAnswer);
         } else {
           if (!review().simulatorState().done) fail("Repeated deck did not finish");
           // Releasing a Confirm held during the final touch rating must not repeat.
-          button(MappedInputManager::Button::Confirm, Step::RepeatReleaseConsumed);
+          if (mappedInputManager.hasTouchHardware())
+            button(MappedInputManager::Button::Confirm, Step::RepeatReleaseConsumed);
+          else
+            advance(Step::RepeatReleaseConsumed);
         }
         break;
       case Step::RepeatReleaseConsumed:
@@ -3264,7 +3274,7 @@ class AnkiSimulatorSmokeTest {
       case Step::CompletedOpened:
         if (!review().simulatorState().done) fail("Completed deck list row did not open completion");
         checkPending(16, 0);
-        tapAction(7, Step::RepeatFromList);
+        activateCardAction(7, Step::RepeatFromList);
         break;
       case Step::RepeatFromList:
         checkCard(0);
@@ -3274,7 +3284,7 @@ class AnkiSimulatorSmokeTest {
       case Step::RepeatDone:
         requireActivity("AnkiHome");
         checkPending(16, 5);
-        LOG_INF("ANKI-SMOKE", "Anki simulator repeat passed: retry resume, alternating cards, touch and release guard");
+        LOG_INF("ANKI-SMOKE", "Anki simulator repeat passed: retry resume, alternating cards and completion");
         std::_Exit(0);
       case Step::SyncHome:
         requireActivity("AnkiHome");
@@ -3325,12 +3335,20 @@ class AnkiSimulatorSmokeTest {
                 "Anki simulator sync passed: configuration route, worker HTTP, receipts and network teardown");
         std::_Exit(0);
       case Step::TouchRelease:
+#if CROSSINK_APP_CAP_TOUCH
         mappedInputManager.simulatorInjectTouchRelease(touchX, touchY);
         advance(afterTouch);
+#else
+        fail("Touch step reached on a button-only profile");
+#endif
         break;
       case Step::SwipeMove:
+#if CROSSINK_APP_CAP_TOUCH
         mappedInputManager.simulatorInjectTouchMove(touchX, touchY);
         step = Step::TouchRelease;
+#else
+        fail("Swipe step reached on a button-only profile");
+#endif
         break;
     }
   }
@@ -3536,23 +3554,51 @@ class AnkiSimulatorSmokeTest {
     advance(next);
   }
   void tap(int x, int y, Step next) {
+#if CROSSINK_APP_CAP_TOUCH
     touchX = x;
     touchY = y;
     afterTouch = next;
     mappedInputManager.simulatorInjectTouchDown(x, y);
     step = Step::TouchRelease;
+#else
+    fail("Tap requested on a button-only profile");
+#endif
   }
-  void tapAction(int action, Step next) {
+  void activateCardAction(int action, Step next) {
+    if (!mappedInputManager.hasTouchHardware()) {
+      if (action >= 3 && action <= 6) {
+        // Use the same rendered selector and physical input as a button reader.
+        mappedInputManager.simulatorClearInputFrame();
+        injectButton(MappedInputManager::Button::Confirm);
+        review().loop();
+        if (activityManager.requestUpdateAndWait() != RequestUpdateResult::Rendered) fail("Selector render rejected");
+        if (!review().simulatorState().selectingRating) fail("Physical selector did not open");
+        for (int moves = 0; review().simulatorFocusedAction() != action && moves < 4; ++moves) {
+          mappedInputManager.simulatorClearInputFrame();
+          injectButton(action % 2 ? MappedInputManager::Button::Down : MappedInputManager::Button::Right);
+          review().loop();
+          if (activityManager.requestUpdateAndWait() != RequestUpdateResult::Rendered) fail("Focus render rejected");
+        }
+        if (review().simulatorFocusedAction() != action) fail("Physical rating focus did not move");
+        mappedInputManager.simulatorClearInputFrame();
+      }
+      button(MappedInputManager::Button::Confirm, next);
+      return;
+    }
     const auto rect = review().simulatorActionRect(action);
     if (rect.width <= 0 || rect.height <= 0) fail("Missing action target");
     tap(rect.x + rect.width / 2, rect.y + rect.height / 2, next);
   }
   void swipe(int startX, int startY, int endX, int endY, Step next) {
+#if CROSSINK_APP_CAP_TOUCH
     mappedInputManager.simulatorInjectTouchDown(startX, startY);
     touchX = endX;
     touchY = endY;
     afterTouch = next;
     step = Step::SwipeMove;
+#else
+    fail("Swipe requested on a button-only profile");
+#endif
   }
   void openTheme() {
     {

@@ -17,6 +17,12 @@ Simulator smoke test:
 - Use `--theme lyra-carousel` to run the flow with a specific UI theme. Supported names include `classic`, `lyra`, `lyra-extended`, `roundedraff`, and `lyra-carousel`.
 - Use `--no-build` to reuse the existing simulator binary or `--window` to show the SDL window instead of running headless.
 
+Anki smoke test:
+- Run `python3 scripts/run_anki_simulator_smoke_test.py --env simulator --build`.
+- Select `simulator-X3`, `sticky-simulator`, `x4-classic-simulator`, or `x4-pro-simulator` with `--env` to cover the other device profiles.
+- The runner tests protocols 2 and 3, persisted review/retry/repeat flows and real HTTP transactions against a local fixture. Button profiles exercise physical controls; touch profiles also exercise taps and swipes.
+- Repeat with `--language de --ui-scale large`; retain `--program` for separately built binaries.
+
 Expected coverage:
 - This is a fast regression tripwire, similar to a small browser smoke test. It proves the simulator can boot, open common screens, load the selected EPUB, turn pages, open reader menus, and exit without crashing or hanging.
 - It is useful for catching activity entry/render crashes, bad allocations, uncaught exceptions, assertions, segfaults, AddressSanitizer/UndefinedBehaviorSanitizer reports, obvious hangs, and EPUB/theme-specific failures for the exact book and theme under test.

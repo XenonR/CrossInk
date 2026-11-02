@@ -151,9 +151,12 @@ def run_phase(program: Path, root: Path, env: dict[str, str], phase: str, timeou
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--program", type=Path, default=ROOT / ".pio/build/x4-pro-simulator/program")
+    parser.add_argument("--env", choices=("simulator", "simulator-X3", "sticky-simulator", "x4-classic-simulator",
+                                          "x4-pro-simulator"), default="x4-pro-simulator",
+                        help="PlatformIO simulator environment to build and run")
+    parser.add_argument("--program", type=Path, help="Run this binary instead of the selected environment's program")
     parser.add_argument("--book", type=Path, default=DEFAULT_BOOK)
-    parser.add_argument("--build", action="store_true", help="Build the x4-pro-simulator environment first")
+    parser.add_argument("--build", action="store_true", help="Build the selected simulator environment first")
     parser.add_argument("--captures", type=Path, help="Save PGM screenshots (messages in all orientations)")
     parser.add_argument("--language", choices=("en", "de"), default="en", help="Anki UI language")
     parser.add_argument("--ui-scale", choices=("small", "large"), default="small", help="Anki UI text size")
@@ -161,13 +164,14 @@ def main() -> int:
     parser.add_argument("--protocol", type=int, choices=(2, 3), action="append", help="Protocol to test (default: both)")
     args = parser.parse_args()
     if args.build:
-        result = subprocess.run(["pio", "run", "-e", "x4-pro-simulator", "-j1"], cwd=ROOT)
+        result = subprocess.run(["pio", "run", "-e", args.env, "-j1"], cwd=ROOT)
         if result.returncode:
             return result.returncode
-    if not args.program.is_file() or not args.book.is_file():
+    program = args.program or ROOT / ".pio" / "build" / args.env / "program"
+    if not program.is_file() or not args.book.is_file():
         print("Simulator binary or EPUB fixture missing; supply --program/--book or build first.", file=sys.stderr)
         return 2
-    program = args.program.resolve()
+    program = program.resolve()
     for version in args.protocol or (2, 3):
         with tempfile.TemporaryDirectory(prefix=f"crossink-anki-p{version}-") as directory:
             root = Path(directory)

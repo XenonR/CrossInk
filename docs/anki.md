@@ -1,4 +1,4 @@
-# Anki on X4 Pro
+# Anki on CrossInk readers
 
 ## Review contract
 
@@ -36,7 +36,7 @@ page mappings do not change the direction of rating selection.
 1. Install one of the supported, unmodified Xteink-Anki desktop add-ons using
    its installation instructions. Keep Anki Desktop open with the intended
    collection selected.
-2. On X4 Pro, open **Home → Anki → Connection**. Enter the desktop server origin
+2. On any supported reader, open **Home → Anki → Connection**. Enter the desktop server origin
    (for example, `http://192.168.1.20:5050`) and the token shown by the add-on.
    Use the same local network on both devices.
 3. Choose **Sync** and connect Wi-Fi. The downloaded due batch is available
@@ -351,18 +351,25 @@ subject to the hardware acceptance steps below.
 Run the normal build and smoke entry points from the repository root:
 
 ```sh
-pio run -e x4-pro -e x4-pro-simulator -e default -e sticky
+pio run -e default -e sticky -e x4-classic -e x4-pro
+pio run -e simulator -e simulator-X3 -e sticky-simulator -e x4-classic-simulator -e x4-pro-simulator
 cmake -S test -B build/test
 cmake --build build/test -j2
 ASAN_OPTIONS=detect_leaks=0 ctest --test-dir build/test --output-on-failure
-python3 scripts/run_anki_simulator_smoke_test.py
+python3 scripts/run_anki_simulator_smoke_test.py --env simulator
+python3 scripts/run_anki_simulator_smoke_test.py --env simulator-X3
+python3 scripts/run_anki_simulator_smoke_test.py --env sticky-simulator
+python3 scripts/run_anki_simulator_smoke_test.py --env x4-classic-simulator
+python3 scripts/run_anki_simulator_smoke_test.py --env x4-pro-simulator
 python3 scripts/run_simulator_smoke_test.py --no-build --env x4-pro-simulator
 pio check -e x4-pro -f '+<src/anki/*>' -f '+<src/activities/anki/*>' \
   --fail-on-defect low --fail-on-defect medium --fail-on-defect high
 ```
 
 If personal PlatformIO overrides replace simulator flags, retain
-`-DCROSSINK_APP_CAP_ANKI=1` for `x4-pro-simulator`. Both smoke runners accept
+`-DCROSSINK_APP_CAP_ANKI=1` for every simulator. Anki defaults to testing both
+protocols; repeat each environment with `--language de --ui-scale large` for the
+second layout combination. Both smoke runners accept
 `--program` for a binary in a separate build directory. The Anki runner uses an
 isolated temporary SD directory and does not contact a real collection.
 
@@ -379,9 +386,11 @@ the same toolchain on 2026-10-31 measure:
 The increase is 54,160 bytes. Static RAM reported by the X4 Pro build is
 104,500 / 327,680 bytes; this does not measure runtime heap or PSRAM use.
 
-### Physical X4 Pro acceptance (pending)
+### Physical-device acceptance (pending)
 
-No physical-device or live Anki Desktop results are claimed. Before release:
+No physical-device or live Anki Desktop results are claimed. Run these checks
+on original X3 and X4, Sticky, X4 Classic, and X4 Pro before release. Touch and
+frontlight checks apply only where the device supports them:
 
 1. Test each pinned, unmodified add-on with **Home → Anki → Connection → Sync**.
    Confirm the intended collection, download, disconnect Wi-Fi, review all four
@@ -398,7 +407,7 @@ No physical-device or live Anki Desktop results are claimed. Before release:
    Good or Easy; only then should the completion screen appear.
    Complete a deck and repeat it using physical Confirm, leave midway, sleep or
    restart, then resume and finish. Open the completed deck from the list and
-   repeat using touch. Sync and inspect Desktop's review history: every pass's
+   repeat using touch where available. Sync and inspect Desktop's review history: every pass's
    ratings, including every Again/Hard retry, must appear in order. Confirm that
    the new downloaded batch replaces the local queue. Release a Confirm held
    during the last touch rating; it must leave the completion screen visible.

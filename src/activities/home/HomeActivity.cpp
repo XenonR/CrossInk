@@ -582,7 +582,7 @@ bool HomeActivity::simulatorPrepareAnki(int& touchX, int& touchY) {
     } else {
       selectorIndex = getHomeMenuSelectionOffset(recentBooks) + i;
     }
-    if (SETTINGS.uiTheme == CrossPointSettings::LYRA_CAROUSEL) {
+    if (mappedInput.hasTouchHardware() && SETTINGS.uiTheme == CrossPointSettings::LYRA_CAROUSEL) {
       const auto rect = LyraCarouselTheme::buttonMenuTouchRect(renderer, items.size());
       touchY = rect.y + rect.height / 2;
       for (int x = 0; x < renderer.getScreenWidth(); ++x) {
