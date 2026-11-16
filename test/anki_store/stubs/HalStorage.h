@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstring>
 #include <map>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -14,6 +15,7 @@ class HalFile;
 struct TestStorage {
   using Files = std::map<std::string, std::vector<uint8_t>>;
   Files files;
+  std::set<std::string> directories;
   size_t bytesRead = 0;
   size_t openCalls = 0;
   bool captureCheckpoints = false;
@@ -35,8 +37,9 @@ struct TestStorage {
     }
     return true;
   }
-  bool mkdir(const char*) { return operation(); }
-  bool exists(const char* path) const { return files.contains(path); }
+  bool mkdir(const char* path) { return operation() && !files.contains(path) && directories.emplace(path).second; }
+  bool ensureDirectoryExists(const char* path) { return directories.contains(path) || mkdir(path); }
+  bool exists(const char* path) const { return files.contains(path) || directories.contains(path); }
   bool remove(const char* path) {
     if (!operation() || handles[path]) return false;
     if (failRemovePath == path) {

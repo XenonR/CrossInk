@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Fix Anki sync failing with a storage error when its SD-card folder already exists, including after saving connection settings.
+
 ## [v1.6.3] - 2026-11-07
 
 ### Changed

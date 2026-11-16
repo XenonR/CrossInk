@@ -20,6 +20,7 @@ Refer to https://freeink.org/llms.txt for guidance.
 ## Real Hardware / Storage
 
 - SdFat on hardware allows only one open reader per file path at a time. If a fallback needs to reopen the same file, close the first handle before reopening.
+- SdFat `mkdir()` fails if the target directory already exists; use `Storage.ensureDirectoryExists()` when preparing a reusable directory.
 
 ## Rendering / Reader Pipeline
 

@@ -126,7 +126,10 @@ bool AnkiConnectionStore::save(const Connection& connection) {
     LOG_ERR("ANKI", "Invalid connection settings");
     return false;
   }
-  Storage.mkdir("/.crossink-anki");
+  if (!Storage.ensureDirectoryExists("/.crossink-anki")) {
+    LOG_ERR("ANKI", "Cannot create Anki directory");
+    return false;
+  }
   JsonDocument doc;
   doc["version"] = 1;
   doc["url"] = connection.url;

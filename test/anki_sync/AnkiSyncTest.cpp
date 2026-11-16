@@ -122,6 +122,41 @@ TEST_F(SyncTest, DownloadsAnInitialSnapshotWithoutUploading) {
   EXPECT_EQ(store.cardCount(), 2);
 }
 
+TEST_F(SyncTest, ExistingSettingsDirectorySupportsInitialAndRepeatedSync) {
+  ASSERT_TRUE(Storage.mkdir("/.crossink-anki"));
+  constexpr char settingsPath[] = "/.crossink-anki/connection.json";
+  const std::vector<uint8_t> settings{'s', 'e', 't', 't', 'i', 'n', 'g', 's'};
+  Storage.files[settingsPath] = settings;
+  for (const char* generation : {"first", "second"}) {
+    replies = {{"/health", HEALTH}, {"/pull?max_cards=250&max_total=1000", snapshot(generation, 2)}};
+    ASSERT_EQ(client.run(CONNECTION), anki::SyncResult::Success);
+    EXPECT_TRUE(replies.empty());
+    EXPECT_STREQ(store.generation(), generation);
+    EXPECT_EQ(store.cardCount(), 2);
+    EXPECT_EQ(Storage.files.at(settingsPath), settings);
+    for (const auto& [path, handles] : Storage.handles) EXPECT_EQ(handles, 0) << path;
+  }
+}
+
+TEST_F(SyncTest, UnusableScratchDirectoryStopsBeforeDownload) {
+  for (const bool blockedByFile : {false, true}) {
+    SCOPED_TRACE(blockedByFile);
+    Storage = {};
+    if (blockedByFile)
+      Storage.files["/.crossink-anki"] = {'x'};
+    else
+      Storage.failAfter = 0;
+    replies = {{"/health", HEALTH}};
+    EXPECT_EQ(client.run(CONNECTION), anki::SyncResult::StorageError);
+    EXPECT_TRUE(replies.empty());
+    EXPECT_FALSE(store.hasSnapshot());
+    EXPECT_FALSE(Storage.exists("/.crossink-anki/pull.tmp"));
+    if (blockedByFile) {
+      EXPECT_EQ(Storage.files.at("/.crossink-anki"), (std::vector<uint8_t>{'x'}));
+    }
+  }
+}
+
 TEST_F(SyncTest, AcknowledgesExactBatchBeforeInstallingReplacement) {
   queueReview();
   replies = {{"/health", HEALTH}, {"/push", "success"}, {"/pull?max_cards=250&max_total=1000", snapshot("new", 0)}};

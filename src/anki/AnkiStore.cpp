@@ -190,7 +190,7 @@ bool AnkiStore::beginSnapshot(const char* generation, uint16_t count) {
     LOG_ERR("ANKI", "Cannot replace pending/invalid snapshot");
     return false;
   }
-  if (!Storage.mkdir(ROOT)) {
+  if (!Storage.ensureDirectoryExists(ROOT)) {
     LOG_ERR("ANKI", "Cannot create Anki directory");
     return false;
   }

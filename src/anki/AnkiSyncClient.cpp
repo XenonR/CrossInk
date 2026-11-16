@@ -158,7 +158,7 @@ SyncResult AnkiSyncClient::run(const Connection& connection, const SyncCallbacks
   response_.reset();
   batch_.reset();
   logMemory("downloading");
-  if (!Storage.mkdir("/.crossink-anki")) {
+  if (!Storage.ensureDirectoryExists("/.crossink-anki")) {
     LOG_ERR("ANKI", "Cannot create download scratch directory");
     return SyncResult::StorageError;
   }
