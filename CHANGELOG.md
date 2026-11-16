@@ -1,8 +1,14 @@
 ## [Unreleased]
 
+## [v1.6.5] - 2026-11-16
+
 ### Added
 
 - Include the Xteink-Anki 2.5.1 desktop add-on source and a standalone installer builder, with installation and connection instructions for Anki flashcards.
+
+### Fixed
+
+- Make Anki questions, answers, and page turns follow the refresh frequency in Settings > Display; changing rating selection uses a fast refresh without advancing the interval.
 
 ## [v1.6.4] - 2026-11-16
 

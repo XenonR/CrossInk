@@ -10,7 +10,6 @@
 #include <memory>
 
 #include "activities/Activity.h"
-#include "activities/ScreenTransitionRefresh.h"
 #include "anki/AnkiStore.h"
 #include "anki/AnkiTextLayout.h"
 
@@ -78,6 +77,7 @@ class AnkiReviewActivity final : public Activity {
   bool storageError = false;
   bool saveError = false;
   bool pageLayoutValid = false;
+  bool pageRefreshPending = true;
   bool uiReady = false;
   bool ignoreConfirmRelease = false;
   freeink::ui::GfxRendererTarget uiTarget;
@@ -86,7 +86,7 @@ class AnkiReviewActivity final : public Activity {
   std::array<freeink::ui::Rect, 8> actionRects{};
   uint32_t layoutPasses = 0;
 #endif
-  ScreenTransitionRefresh refresh;
+  int pagesUntilFullRefresh = 0;
 
   void loadNextCard();
   void loadSide();

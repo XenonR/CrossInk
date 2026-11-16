@@ -10,6 +10,7 @@
 #include <ctime>
 
 #include "AnkiUi.h"
+#include "activities/reader/ReaderUtils.h"
 #include "components/CompactHeader.h"
 #include "components/TouchHeaderBackButton.h"
 #include "components/UIScale.h"
@@ -150,6 +151,7 @@ void AnkiReviewActivity::changePage(const bool next) {
   }
   uiReady = false;
   pageLayoutValid = false;
+  pageRefreshPending = true;
   requestUpdate();
 }
 
@@ -159,6 +161,7 @@ void AnkiReviewActivity::activateAction(const int action) {
     return;
   }
   if (!actionEnabled(action)) return;
+  pageRefreshPending = true;
   if (action == kRepeat) {
     if (!store.restartDeck(deckId)) {
       LOG_ERR("ANKI", "Cannot persist deck restart");
@@ -295,6 +298,7 @@ void AnkiReviewActivity::drawCard(UiApp::ScreenType& screen) {
     pageStart = {};
     pageNumber = 0;
     pageLayoutValid = false;
+    pageRefreshPending = true;
   }
   if (!pageLayoutValid) {
     // Focus/tap redraws reuse the borrowed line offsets. Text measurement can
@@ -377,6 +381,13 @@ void AnkiReviewActivity::render(RenderLock&&) {
                                             selectingRating ? tr(STR_DIR_UP) : tr(STR_PREV_PAGE),
                                             selectingRating ? tr(STR_DIR_DOWN) : tr(STR_NEXT_PAGE));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
-  renderer.displayBuffer(refresh.modeFor(static_cast<uint8_t>((card.ordinal * 2 + (answer ? 1 : 0)) % 251)));
+  if (pageRefreshPending) {
+    ReaderUtils::displayWithRefreshCycle(renderer, pagesUntilFullRefresh);
+    pageRefreshPending = false;
+  } else {
+    // Rating focus and touch feedback redraw the same page without advancing
+    // the user's cleanup cadence.
+    renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+  }
 }
 #endif
