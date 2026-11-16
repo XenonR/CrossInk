@@ -93,9 +93,17 @@ See [Controls](./docs/controls.md) for the full action list and defaults.
 
 Open **Home → Anki** to review flashcards offline, then sync your ratings back to Anki Desktop. CrossInk downloads a batch of due cards to the SD card; saved ratings and your place in the deck survive sleep and restarts.
 
-1. Install a supported Xteink-Anki desktop add-on and keep Anki Desktop open with your collection selected.
-2. On the reader, open **Anki → Connection**, enter the add-on's server address and token, then choose **Sync**. Both devices must be on the same local network.
-3. Select a downloaded deck and review without Wi-Fi. Sync again to upload your ratings and download the next due batch. Sync is manual.
+Build the included [Xteink-Anki desktop add-on 2.5.1](./addons/anki/README.md) from the repository root with Python 3 (standard library only):
+
+```sh
+python3 addons/anki/build.py
+```
+
+1. In Anki Desktop, open **Tools → Add-ons → Install from file** and select the generated `addons/anki/dist/xteink_sync.ankiaddon`.
+2. Restart Anki, select your intended collection, and open **Tools → Xteink Status**. Note the computer's LAN address, port (default **5050**), and API token. The add-on generates the token automatically on first start.
+3. Keep Anki Desktop open. Connect the computer and reader to the same local network, and allow Anki through the computer's firewall for local connections to that port.
+4. On the reader, open **Home → Anki → Connection**. Enter the server address using the computer's LAN IP and port, for example `http://192.168.1.20:5050`, and enter the API token separately. Return to the Anki screen and choose **Sync**.
+5. Select a downloaded deck and review without Wi-Fi. Sync again to upload your ratings and download the next due batch. Sync is manual.
 
 Use **Again**, **Hard**, **Good**, or **Easy** to rate an answer. Again and Hard return cards later in the same pass, targeting gaps of two and five intervening saved answers respectively; small decks can repeat sooner. Good and Easy complete the card for the current pass. Once every card is complete, **Repeat deck** starts another offline pass and saves those additional ratings too. With physical buttons, Confirm reveals the answer, then opens the rating selector; choose a rating with the directional buttons and Confirm to save. Outside the selector, directional buttons page through long text.
 

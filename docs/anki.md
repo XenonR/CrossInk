@@ -33,9 +33,10 @@ the rating selector; directional buttons choose a rating, and Confirm saves it.
 Outside rating selection, directional buttons page through long text. Side-button
 page mappings do not change the direction of rating selection.
 
-1. Install one of the supported, unmodified Xteink-Anki desktop add-ons using
-   its installation instructions. Keep Anki Desktop open with the intended
-   collection selected.
+1. Build and install the included [Xteink-Anki desktop add-on 2.5.1](../addons/anki/README.md)
+   following the [README setup steps](../README.md#anki-flashcards), or use another
+   supported, unmodified version below. Keep Anki Desktop open with the intended
+   collection selected; **Tools → Xteink Status** shows its address, port, and token.
 2. On any supported reader, open **Home → Anki → Connection**. Enter the desktop server origin
    (for example, `http://192.168.1.20:5050`) and the token shown by the add-on.
    Use the same local network on both devices.
@@ -79,13 +80,14 @@ the same collection.
 - CrossInk v1.6.1: `9914146eeae7b46b300f475a16c32426fc02ec1f`.
 - FreeInk SDK: `699370183fa3a0e33c9cb83a36f701bbb6022095`; no SDK changes.
 - [Xteink-Anki v2.4.0](https://github.com/jakovm/xteink-anki/tree/fbf1672ae290ab98578baf9f0f87db0ff84f5e1f): protocol 2.
-- [Xteink-Anki main](https://github.com/jakovm/xteink-anki/tree/df2b960dd930af04277525305daa684b0639534b): add-on 2.5.1, protocol 3.
+- [Xteink-Anki main](https://github.com/jakovm/xteink-anki/tree/df2b960dd930af04277525305daa684b0639534b): add-on 2.5.1, protocol 3; [vendored source and installer builder](../addons/anki/README.md).
 - [FlashPoint development](https://github.com/zakkbob/flashpoint/tree/028c06a8f06c002147b2f60de043d890796c4732): memory-only CardStore/AnkiConnect reference.
 - [CrossNext](https://github.com/manuelx900/CrossNext/tree/e1174b339e9d4e0cc260c932c493e9fb1872bb44): indexed storage and pagination reference; different bridge protocol.
 
-These references have MIT root licenses. The implementation is CrossInk-native;
-retain original notices if substantial source is adapted. No reference fonts,
-hardware layers, schedulers or media assets are imported.
+These references have MIT root licenses. The firmware implementation is
+CrossInk-native; the included desktop add-on retains its original source and
+[license](../addons/anki/LICENSE). No reference fonts, hardware layers, schedulers
+or media assets are imported.
 
 ## Wire contract
 
