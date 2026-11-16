@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Include the Xteink-Anki 2.5.1 desktop add-on source and a standalone installer builder, with installation and connection instructions for Anki flashcards.
+
 ## [v1.6.4] - 2026-11-16
 
 ### Fixed

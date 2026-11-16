@@ -1,0 +1,17 @@
+{
+    "bind_address": "0.0.0.0",
+    "port": 5050,
+    "mdns_enabled": true,
+    "mdns_name": "Xteink Anki",
+    "api_token": "",
+    "max_cards": 250,
+    "max_total_cards": 1000,
+    "max_text_chars": 4096,
+    "max_reviews_per_push": 500,
+    "max_request_bytes": 262144,
+    "operation_timeout_seconds": 60,
+    "sync_after_push": true,
+    "allow_legacy_csv": true,
+    "cors_allowed_origin": "*",
+    "processed_batch_ids": []
+}
