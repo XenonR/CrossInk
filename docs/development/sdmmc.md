@@ -19,7 +19,7 @@ Neither change proves the cause of a particular card's write failures.
 pio run -e x4-pro
 ```
 
-The output is `.pio/build/x4-pro/firmware-x4-pro.bin`. Version 1.6.3 is
+The output is `.pio/build/x4-pro/firmware-x4-pro.bin`. Version 1.6.4 is
 set in `[crossink]` in `platformio.ini` and receives the usual device suffix.
 
 Arduino supplies precompiled IDF libraries. Merely editing an installed
