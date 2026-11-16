@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+## [v1.6.3] - 2026-11-07
+
+### Changed
+
+- Increase the X4 Pro SDMMC data timeout to the hardware maximum at its existing 20 MHz clock: approximately 839 ms (838.86075 ms), allowing more time for cards that still occasionally time out with 500 ms.
+
+## [v1.6.2] - 2026-11-07
+
 ### Added
 
 - Review downloaded Anki text cards offline on X3/X4, Sticky, X4 Classic, and X4 Pro, with paged questions and answers, basic bold text, touch and physical controls, and SD-persisted ratings.
@@ -16,6 +24,7 @@
 
 ### Fixed
 
+- Allow 500 ms for SDMMC data transfers on X4 Pro and backport ESP-IDF #19034 to space out card-status polls while waiting for writes to finish.
 - Select every Anki rating with front or side buttons, including swapped page-button mappings.
 - Keep stalled Anki response downloads cancellable, bound idle waits, and retain the installed cards when scratch-file reads or closes fail.
 - Make Anki Again and Hard repeat cards during offline review instead of completing them. Repeats target two and five intervening saved answers, survive restarts, and sync every rating to Anki Desktop; Good and Easy complete the cards.

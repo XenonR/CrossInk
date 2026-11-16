@@ -12,6 +12,7 @@ It is written for software developers who may be new to embedded development.
 - [Getting Started](./getting-started.md)
 - [Architecture Overview](./architecture.md)
 - [Testing and Debugging](./testing-debugging.md)
+- [X4 Pro SDMMC Fixes](./sdmmc.md)
 - [Icon Libraries](./icons.md)
 
 If you are new, start with [Getting Started](./getting-started.md).

@@ -1,0 +1,29 @@
+X4 Pro: use the maximum SDMMC data timeout at the current 20 MHz clock.
+
+Targets ESP-IDF 87912cd291d68f4319f13695718af6754879a83f, as shipped by
+PioArduino 55.03.37. Related upstream report:
+https://github.com/espressif/esp-idf/issues/12968
+
+At the current SDMMC_FREQ_DEFAULT (20 MHz), requesting 839 ms makes the
+existing LL setter clamp 16,780,000 cycles to the 24-bit register maximum
+of 16,777,215 cycles: 838.86075 ms. Keep the clock unchanged and label the
+log as the requested timeout, since the hardware rounds it down slightly.
+This does not change the separate command timeout or five-second card-ready
+deadline.
+
+diff --git a/esp_driver_sdmmc/src/sdmmc_host.c b/esp_driver_sdmmc/src/sdmmc_host.c
+--- a/esp_driver_sdmmc/src/sdmmc_host.c
++++ b/esp_driver_sdmmc/src/sdmmc_host.c
+@@ -293,9 +293,11 @@ static int sdmmc_host_calc_freq(soc_periph_sdmmc_clk_src_t src, const int host_div,
+ 
+ static void sdmmc_host_set_data_timeout(uint32_t freq_khz)
+ {
+-    const uint32_t data_timeout_ms = 100;
++    const uint32_t data_timeout_ms = 839;
+     uint32_t data_timeout_cycles = data_timeout_ms * freq_khz;
+     sdmmc_ll_set_data_timeout(s_host_ctx.hal.dev, data_timeout_cycles);
++    esp_rom_printf("CrossInk SDMMC: data timeout request=%u ms, requested clock=%u kHz\n",
++                   (unsigned)data_timeout_ms, (unsigned)freq_khz);
+ }
+ 
+ esp_err_t sdmmc_host_set_card_clk(int slot, uint32_t freq_khz)
